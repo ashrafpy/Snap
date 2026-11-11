@@ -2,10 +2,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::curves::CurvesParams;
 use crate::image_types::{HistogramData, LutColorSpace};
+pub use crate::ops_ext::*;
 
-/// Identifiers for all supported Snap editing tools.
+/// The 6 primary tool categories organizing all 35 Snap editing operations.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ToolCategory {
+    CoreColor,
+    Geometry,
+    LocalRetouch,
+    FilmCreative,
+    BlurOptics,
+    PortraitFinish,
+}
+
+impl ToolCategory {
+    pub const ALL: &'static [ToolCategory] = &[
+        ToolCategory::CoreColor,
+        ToolCategory::Geometry,
+        ToolCategory::LocalRetouch,
+        ToolCategory::FilmCreative,
+        ToolCategory::BlurOptics,
+        ToolCategory::PortraitFinish,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::CoreColor => "Core & Color",
+            Self::Geometry => "Geometry",
+            Self::LocalRetouch => "Local & Retouch",
+            Self::FilmCreative => "Film & Creative",
+            Self::BlurOptics => "Blur & Optics",
+            Self::PortraitFinish => "Portrait & Finish",
+        }
+    }
+}
+
+/// Identifiers for all 35 supported Snap editing tools.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ToolId {
+    // Core & Color (10)
     RawDevelop,
     TuneImage,
     Details,
@@ -13,13 +48,49 @@ pub enum ToolId {
     WhiteBalance,
     ColorHsl,
     Lut3d,
+    ColorGrade,
+    Dehaze,
+    TonalContrast,
+
+    // Geometry (3)
+    CropRotate,
+    Perspective,
+    Expand,
+
+    // Local & Retouch (3)
+    Selective,
+    Brush,
+    Healing,
+
+    // Film & Creative (13)
     BlackAndWhite,
     Vignette,
-    CropRotate,
+    Halation,
+    Bloom,
+    GrainyFilm,
+    Noir,
+    HdrScape,
+    GlamourGlow,
+    Drama,
+    Vintage,
+    DoubleExposure,
+    Retrolux,
+    Grunge,
+
+    // Blur & Optics (2)
+    LensBlur,
+    MotionBlur,
+
+    // Portrait & Finish (4)
+    Portrait,
+    HeadPose,
+    Frames,
+    TextOverlay,
 }
 
 impl ToolId {
     pub const ALL: &'static [ToolId] = &[
+        // Core & Color
         ToolId::RawDevelop,
         ToolId::TuneImage,
         ToolId::Details,
@@ -27,9 +98,39 @@ impl ToolId {
         ToolId::WhiteBalance,
         ToolId::ColorHsl,
         ToolId::Lut3d,
+        ToolId::ColorGrade,
+        ToolId::Dehaze,
+        ToolId::TonalContrast,
+        // Geometry
+        ToolId::CropRotate,
+        ToolId::Perspective,
+        ToolId::Expand,
+        // Local & Retouch
+        ToolId::Selective,
+        ToolId::Brush,
+        ToolId::Healing,
+        // Film & Creative
         ToolId::BlackAndWhite,
         ToolId::Vignette,
-        ToolId::CropRotate,
+        ToolId::Halation,
+        ToolId::Bloom,
+        ToolId::GrainyFilm,
+        ToolId::Noir,
+        ToolId::HdrScape,
+        ToolId::GlamourGlow,
+        ToolId::Drama,
+        ToolId::Vintage,
+        ToolId::DoubleExposure,
+        ToolId::Retrolux,
+        ToolId::Grunge,
+        // Blur & Optics
+        ToolId::LensBlur,
+        ToolId::MotionBlur,
+        // Portrait & Finish
+        ToolId::Portrait,
+        ToolId::HeadPose,
+        ToolId::Frames,
+        ToolId::TextOverlay,
     ];
 
     pub fn display_name(&self) -> &'static str {
@@ -41,9 +142,39 @@ impl ToolId {
             Self::WhiteBalance => "White Balance",
             Self::ColorHsl => "Color / HSL",
             Self::Lut3d => "3D LUT",
+            Self::ColorGrade => "Color Grade",
+            Self::Dehaze => "Dehaze",
+            Self::TonalContrast => "Tonal Contrast",
+
+            Self::CropRotate => "Crop & Rotate",
+            Self::Perspective => "Perspective",
+            Self::Expand => "Expand",
+
+            Self::Selective => "Selective",
+            Self::Brush => "Brush",
+            Self::Healing => "Healing",
+
             Self::BlackAndWhite => "Black & White",
             Self::Vignette => "Vignette",
-            Self::CropRotate => "Crop & Rotate",
+            Self::Halation => "Halation",
+            Self::Bloom => "Bloom",
+            Self::GrainyFilm => "Grainy Film",
+            Self::Noir => "Noir",
+            Self::HdrScape => "HDR Scape",
+            Self::GlamourGlow => "Glamour Glow",
+            Self::Drama => "Drama",
+            Self::Vintage => "Vintage",
+            Self::DoubleExposure => "Double Exposure",
+            Self::Retrolux => "Retrolux",
+            Self::Grunge => "Grunge",
+
+            Self::LensBlur => "Lens Blur",
+            Self::MotionBlur => "Motion Blur",
+
+            Self::Portrait => "Portrait",
+            Self::HeadPose => "Head Pose",
+            Self::Frames => "Frames",
+            Self::TextOverlay => "Text Overlay",
         }
     }
 
@@ -56,25 +187,91 @@ impl ToolId {
             Self::WhiteBalance => "wb",
             Self::ColorHsl => "hsl",
             Self::Lut3d => "lut",
+            Self::ColorGrade => "grade",
+            Self::Dehaze => "dhz",
+            Self::TonalContrast => "tonal",
+
+            Self::CropRotate => "crop",
+            Self::Perspective => "persp",
+            Self::Expand => "expd",
+
+            Self::Selective => "sel",
+            Self::Brush => "brsh",
+            Self::Healing => "heal",
+
             Self::BlackAndWhite => "bw",
             Self::Vignette => "vig",
-            Self::CropRotate => "crop",
+            Self::Halation => "halo",
+            Self::Bloom => "blm",
+            Self::GrainyFilm => "film",
+            Self::Noir => "noir",
+            Self::HdrScape => "hdr",
+            Self::GlamourGlow => "glow",
+            Self::Drama => "drm",
+            Self::Vintage => "vint",
+            Self::DoubleExposure => "dbx",
+            Self::Retrolux => "rlx",
+            Self::Grunge => "grng",
+
+            Self::LensBlur => "lblur",
+            Self::MotionBlur => "mblur",
+
+            Self::Portrait => "port",
+            Self::HeadPose => "pose",
+            Self::Frames => "frm",
+            Self::TextOverlay => "txt",
+        }
+    }
+
+    pub fn tool_category(&self) -> ToolCategory {
+        match self {
+            Self::RawDevelop
+            | Self::TuneImage
+            | Self::Details
+            | Self::Curves
+            | Self::WhiteBalance
+            | Self::ColorHsl
+            | Self::Lut3d
+            | Self::ColorGrade
+            | Self::Dehaze
+            | Self::TonalContrast => ToolCategory::CoreColor,
+
+            Self::CropRotate | Self::Perspective | Self::Expand => ToolCategory::Geometry,
+
+            Self::Selective | Self::Brush | Self::Healing => ToolCategory::LocalRetouch,
+
+            Self::BlackAndWhite
+            | Self::Vignette
+            | Self::Halation
+            | Self::Bloom
+            | Self::GrainyFilm
+            | Self::Noir
+            | Self::HdrScape
+            | Self::GlamourGlow
+            | Self::Drama
+            | Self::Vintage
+            | Self::DoubleExposure
+            | Self::Retrolux
+            | Self::Grunge => ToolCategory::FilmCreative,
+
+            Self::LensBlur | Self::MotionBlur => ToolCategory::BlurOptics,
+
+            Self::Portrait | Self::HeadPose | Self::Frames | Self::TextOverlay => {
+                ToolCategory::PortraitFinish
+            }
         }
     }
 
     pub fn category(&self) -> &'static str {
-        match self {
-            Self::RawDevelop => "Develop",
-            Self::TuneImage => "Tone",
-            Self::Curves => "Tone",
-            Self::Details => "Detail",
-            Self::WhiteBalance => "Color",
-            Self::ColorHsl => "Color",
-            Self::Lut3d => "Creative",
-            Self::BlackAndWhite => "Creative",
-            Self::Vignette => "Creative",
-            Self::CropRotate => "Geometry",
-        }
+        self.tool_category().display_name()
+    }
+
+    pub fn in_category(cat: ToolCategory) -> Vec<ToolId> {
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|t| t.tool_category() == cat)
+            .collect()
     }
 }
 
@@ -172,13 +369,9 @@ impl WhiteBalanceParams {
         let g = rgb[1] / luma;
         let b = rgb[2] / luma;
 
-        // Temperature: warm (r > b) -> shift cool (negative); cool (b > r) -> shift warm (positive)
         let temp_diff = b - r;
         let temperature = (temp_diff * 100.0).clamp(-100.0, 100.0);
 
-        // Tint: Green vs Magenta axis.
-        // Green cast (g > mid(r, b)) requires magenta shift (positive tint).
-        // Magenta cast requires green shift (negative tint).
         let rb_mid = (r + b) * 0.5;
         let tint_diff = g - rb_mid;
         let tint = (tint_diff * 100.0).clamp(-100.0, 100.0);
@@ -233,10 +426,8 @@ impl TuneParams {
         let p50 = p_target(0.50) as f32;
         let p95 = p_target(0.95) as f32;
 
-        // Brightness correction toward balanced midpoint (128)
         let brightness = ((128.0 - p50) / 128.0 * 35.0).clamp(-40.0, 40.0);
 
-        // Contrast boost if dynamic range is narrow
         let dr = p95 - p5;
         let contrast = if dr < 170.0 {
             ((170.0 - dr) / 170.0 * 25.0).clamp(0.0, 30.0)
@@ -610,7 +801,6 @@ impl CropRotateParams {
 
     /// Exact analytical formula for the maximum axis-aligned rectangle of the given aspect ratio
     /// that fits inside a rectangle of dimensions `(aspect_w_over_h, 1.0)` rotated by `angle_deg`.
-    /// Guaranteed so straighten never reveals black corners.
     pub fn inscribed_max_scale(aspect_w_over_h: f32, angle_deg: f32) -> f32 {
         let theta = angle_deg.abs().to_radians();
         let cos_t = theta.cos();
@@ -653,9 +843,10 @@ impl CropRotateParams {
     }
 }
 
-/// Unified enum for any editing operation in the Snap processing pipeline.
+/// Unified enum for any editing operation across all 35 Snap tools.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub enum EditOp {
+    // Core & Color (10)
     RawDevelop(RawDevelopParams),
     TuneImage(TuneParams),
     Details(DetailsParams),
@@ -663,9 +854,44 @@ pub enum EditOp {
     WhiteBalance(WhiteBalanceParams),
     ColorHsl(ColorHslParams),
     Lut3d(Lut3dParams),
+    ColorGrade(ColorGradeParams),
+    Dehaze(DehazeParams),
+    TonalContrast(TonalContrastParams),
+
+    // Geometry (3)
+    CropRotate(CropRotateParams),
+    Perspective(PerspectiveParams),
+    Expand(ExpandParams),
+
+    // Local & Retouch (3)
+    Selective(SelectiveParams),
+    Brush(BrushParams),
+    Healing(HealingParams),
+
+    // Film & Creative (13)
     BlackAndWhite(BwParams),
     Vignette(VignetteParams),
-    CropRotate(CropRotateParams),
+    Halation(HalationParams),
+    Bloom(BloomParams),
+    GrainyFilm(GrainyFilmParams),
+    Noir(NoirParams),
+    HdrScape(HdrScapeParams),
+    GlamourGlow(GlamourGlowParams),
+    Drama(DramaParams),
+    Vintage(VintageParams),
+    DoubleExposure(DoubleExposureParams),
+    Retrolux(RetroluxParams),
+    Grunge(GrungeParams),
+
+    // Blur & Optics (2)
+    LensBlur(LensBlurParams),
+    MotionBlur(MotionBlurParams),
+
+    // Portrait & Finish (4)
+    Portrait(PortraitParams),
+    HeadPose(HeadPoseParams),
+    Frames(FramesParams),
+    TextOverlay(TextOverlayParams),
 }
 
 impl EditOp {
@@ -678,9 +904,39 @@ impl EditOp {
             Self::WhiteBalance(_) => ToolId::WhiteBalance,
             Self::ColorHsl(_) => ToolId::ColorHsl,
             Self::Lut3d(_) => ToolId::Lut3d,
+            Self::ColorGrade(_) => ToolId::ColorGrade,
+            Self::Dehaze(_) => ToolId::Dehaze,
+            Self::TonalContrast(_) => ToolId::TonalContrast,
+
+            Self::CropRotate(_) => ToolId::CropRotate,
+            Self::Perspective(_) => ToolId::Perspective,
+            Self::Expand(_) => ToolId::Expand,
+
+            Self::Selective(_) => ToolId::Selective,
+            Self::Brush(_) => ToolId::Brush,
+            Self::Healing(_) => ToolId::Healing,
+
             Self::BlackAndWhite(_) => ToolId::BlackAndWhite,
             Self::Vignette(_) => ToolId::Vignette,
-            Self::CropRotate(_) => ToolId::CropRotate,
+            Self::Halation(_) => ToolId::Halation,
+            Self::Bloom(_) => ToolId::Bloom,
+            Self::GrainyFilm(_) => ToolId::GrainyFilm,
+            Self::Noir(_) => ToolId::Noir,
+            Self::HdrScape(_) => ToolId::HdrScape,
+            Self::GlamourGlow(_) => ToolId::GlamourGlow,
+            Self::Drama(_) => ToolId::Drama,
+            Self::Vintage(_) => ToolId::Vintage,
+            Self::DoubleExposure(_) => ToolId::DoubleExposure,
+            Self::Retrolux(_) => ToolId::Retrolux,
+            Self::Grunge(_) => ToolId::Grunge,
+
+            Self::LensBlur(_) => ToolId::LensBlur,
+            Self::MotionBlur(_) => ToolId::MotionBlur,
+
+            Self::Portrait(_) => ToolId::Portrait,
+            Self::HeadPose(_) => ToolId::HeadPose,
+            Self::Frames(_) => ToolId::Frames,
+            Self::TextOverlay(_) => ToolId::TextOverlay,
         }
     }
 
@@ -693,9 +949,39 @@ impl EditOp {
             ToolId::WhiteBalance => Self::WhiteBalance(WhiteBalanceParams::default()),
             ToolId::ColorHsl => Self::ColorHsl(ColorHslParams::default()),
             ToolId::Lut3d => Self::Lut3d(Lut3dParams::default()),
+            ToolId::ColorGrade => Self::ColorGrade(ColorGradeParams::default()),
+            ToolId::Dehaze => Self::Dehaze(DehazeParams::initial_active()),
+            ToolId::TonalContrast => Self::TonalContrast(TonalContrastParams::initial_active()),
+
+            ToolId::CropRotate => Self::CropRotate(CropRotateParams::default()),
+            ToolId::Perspective => Self::Perspective(PerspectiveParams::default()),
+            ToolId::Expand => Self::Expand(ExpandParams::default()),
+
+            ToolId::Selective => Self::Selective(SelectiveParams::initial_active()),
+            ToolId::Brush => Self::Brush(BrushParams::default()),
+            ToolId::Healing => Self::Healing(HealingParams::default()),
+
             ToolId::BlackAndWhite => Self::BlackAndWhite(BwParams::default()),
             ToolId::Vignette => Self::Vignette(VignetteParams::initial_active()),
-            ToolId::CropRotate => Self::CropRotate(CropRotateParams::default()),
+            ToolId::Halation => Self::Halation(HalationParams::initial_active()),
+            ToolId::Bloom => Self::Bloom(BloomParams::initial_active()),
+            ToolId::GrainyFilm => Self::GrainyFilm(GrainyFilmParams::initial_active()),
+            ToolId::Noir => Self::Noir(NoirParams::initial_active()),
+            ToolId::HdrScape => Self::HdrScape(HdrScapeParams::initial_active()),
+            ToolId::GlamourGlow => Self::GlamourGlow(GlamourGlowParams::initial_active()),
+            ToolId::Drama => Self::Drama(DramaParams::initial_active()),
+            ToolId::Vintage => Self::Vintage(VintageParams::initial_active()),
+            ToolId::DoubleExposure => Self::DoubleExposure(DoubleExposureParams::initial_active()),
+            ToolId::Retrolux => Self::Retrolux(RetroluxParams::initial_active()),
+            ToolId::Grunge => Self::Grunge(GrungeParams::initial_active()),
+
+            ToolId::LensBlur => Self::LensBlur(LensBlurParams::initial_active()),
+            ToolId::MotionBlur => Self::MotionBlur(MotionBlurParams::initial_active()),
+
+            ToolId::Portrait => Self::Portrait(PortraitParams::initial_active()),
+            ToolId::HeadPose => Self::HeadPose(HeadPoseParams::initial_active()),
+            ToolId::Frames => Self::Frames(FramesParams::initial_active()),
+            ToolId::TextOverlay => Self::TextOverlay(TextOverlayParams::initial_active()),
         }
     }
 
@@ -708,9 +994,39 @@ impl EditOp {
             Self::WhiteBalance(p) => p.is_identity(),
             Self::ColorHsl(p) => p.is_identity(),
             Self::Lut3d(p) => p.is_identity(),
+            Self::ColorGrade(p) => p.is_identity(),
+            Self::Dehaze(p) => p.is_identity(),
+            Self::TonalContrast(p) => p.is_identity(),
+
+            Self::CropRotate(p) => p.is_identity(),
+            Self::Perspective(p) => p.is_identity(),
+            Self::Expand(p) => p.is_identity(),
+
+            Self::Selective(p) => p.is_identity(),
+            Self::Brush(p) => p.is_identity(),
+            Self::Healing(p) => p.is_identity(),
+
             Self::BlackAndWhite(p) => p.is_identity(),
             Self::Vignette(p) => p.is_identity(),
-            Self::CropRotate(p) => p.is_identity(),
+            Self::Halation(p) => p.is_identity(),
+            Self::Bloom(p) => p.is_identity(),
+            Self::GrainyFilm(p) => p.is_identity(),
+            Self::Noir(p) => p.is_identity(),
+            Self::HdrScape(p) => p.is_identity(),
+            Self::GlamourGlow(p) => p.is_identity(),
+            Self::Drama(p) => p.is_identity(),
+            Self::Vintage(p) => p.is_identity(),
+            Self::DoubleExposure(p) => p.is_identity(),
+            Self::Retrolux(p) => p.is_identity(),
+            Self::Grunge(p) => p.is_identity(),
+
+            Self::LensBlur(p) => p.is_identity(),
+            Self::MotionBlur(p) => p.is_identity(),
+
+            Self::Portrait(p) => p.is_identity(),
+            Self::HeadPose(p) => p.is_identity(),
+            Self::Frames(p) => p.is_identity(),
+            Self::TextOverlay(p) => p.is_identity(),
         }
     }
 
@@ -927,6 +1243,7 @@ impl EditOp {
                     p.sharpening,
                 ),
             ],
+            Self::Curves(_) => Vec::new(),
             Self::WhiteBalance(p) => vec![
                 (
                     ParamDescriptor {
@@ -1010,6 +1327,395 @@ impl EditOp {
                 },
                 p.strength,
             )],
+            Self::ColorGrade(p) => {
+                let wheel = match p.active_wheel {
+                    ColorWheelZone::Shadows => &p.shadows,
+                    ColorWheelZone::Midtones => &p.midtones,
+                    ColorWheelZone::Highlights => &p.highlights,
+                    ColorWheelZone::Global => &p.global,
+                };
+                vec![
+                    (
+                        ParamDescriptor {
+                            name: "Hue",
+                            key: "hue",
+                            min: 0.0,
+                            max: 360.0,
+                            default: 0.0,
+                            step: 1.0,
+                            unit: "deg",
+                        },
+                        wheel.hue_deg,
+                    ),
+                    (
+                        ParamDescriptor {
+                            name: "Saturation",
+                            key: "saturation",
+                            min: 0.0,
+                            max: 100.0,
+                            default: 0.0,
+                            step: 1.0,
+                            unit: "%",
+                        },
+                        wheel.saturation,
+                    ),
+                    (
+                        ParamDescriptor {
+                            name: "Luminance",
+                            key: "luminance",
+                            min: -100.0,
+                            max: 100.0,
+                            default: 0.0,
+                            step: 1.0,
+                            unit: "",
+                        },
+                        wheel.luminance,
+                    ),
+                    (
+                        ParamDescriptor {
+                            name: "Balance",
+                            key: "balance",
+                            min: -100.0,
+                            max: 100.0,
+                            default: 0.0,
+                            step: 1.0,
+                            unit: "",
+                        },
+                        p.balance,
+                    ),
+                    (
+                        ParamDescriptor {
+                            name: "Blending",
+                            key: "blending",
+                            min: 0.0,
+                            max: 100.0,
+                            default: 50.0,
+                            step: 1.0,
+                            unit: "%",
+                        },
+                        p.blending,
+                    ),
+                ]
+            }
+            Self::Dehaze(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Strength",
+                        key: "strength",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Warmth Offset",
+                        key: "warmth_offset",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.warmth_offset,
+                ),
+            ],
+            Self::TonalContrast(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "High Tones",
+                        key: "high_tones",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.high_tones,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Mid Tones",
+                        key: "mid_tones",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.mid_tones,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Low Tones",
+                        key: "low_tones",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.low_tones,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Protect Shadows",
+                        key: "protect_shadows",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.protect_shadows,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Protect Highlights",
+                        key: "protect_highlights",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.protect_highlights,
+                ),
+            ],
+            Self::CropRotate(p) => vec![(
+                ParamDescriptor {
+                    name: "Straighten",
+                    key: "straighten",
+                    min: -45.0,
+                    max: 45.0,
+                    default: 0.0,
+                    step: 0.1,
+                    unit: "deg",
+                },
+                p.straighten_deg,
+            )],
+            Self::Perspective(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Vertical",
+                        key: "vertical",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.vertical,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Horizontal",
+                        key: "horizontal",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.horizontal,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Rotate",
+                        key: "rotate",
+                        min: -45.0,
+                        max: 45.0,
+                        default: 0.0,
+                        step: 0.1,
+                        unit: "deg",
+                    },
+                    p.rotate_deg,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Scale",
+                        key: "scale",
+                        min: 0.5,
+                        max: 2.0,
+                        default: 1.0,
+                        step: 0.01,
+                        unit: "",
+                    },
+                    p.scale,
+                ),
+            ],
+            Self::Expand(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Top",
+                        key: "top",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.top * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Bottom",
+                        key: "bottom",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.bottom * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Left",
+                        key: "left",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.left * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Right",
+                        key: "right",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.right * 100.0,
+                ),
+            ],
+            Self::Selective(p) => {
+                if p.active_pin < p.pins.len() {
+                    let pin = &p.pins[p.active_pin];
+                    vec![
+                        (
+                            ParamDescriptor {
+                                name: "Brightness",
+                                key: "brightness",
+                                min: -100.0,
+                                max: 100.0,
+                                default: 0.0,
+                                step: 1.0,
+                                unit: "",
+                            },
+                            pin.brightness,
+                        ),
+                        (
+                            ParamDescriptor {
+                                name: "Contrast",
+                                key: "contrast",
+                                min: -100.0,
+                                max: 100.0,
+                                default: 0.0,
+                                step: 1.0,
+                                unit: "",
+                            },
+                            pin.contrast,
+                        ),
+                        (
+                            ParamDescriptor {
+                                name: "Saturation",
+                                key: "saturation",
+                                min: -100.0,
+                                max: 100.0,
+                                default: 0.0,
+                                step: 1.0,
+                                unit: "",
+                            },
+                            pin.saturation,
+                        ),
+                        (
+                            ParamDescriptor {
+                                name: "Structure",
+                                key: "structure",
+                                min: -100.0,
+                                max: 100.0,
+                                default: 0.0,
+                                step: 1.0,
+                                unit: "",
+                            },
+                            pin.structure,
+                        ),
+                        (
+                            ParamDescriptor {
+                                name: "Radius",
+                                key: "radius",
+                                min: 1.0,
+                                max: 100.0,
+                                default: 25.0,
+                                step: 1.0,
+                                unit: "%",
+                            },
+                            pin.radius * 100.0,
+                        ),
+                    ]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::Brush(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Radius",
+                        key: "radius",
+                        min: 1.0,
+                        max: 50.0,
+                        default: 10.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.radius * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Feather",
+                        key: "feather",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 50.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.feather * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Step Intensity",
+                        key: "step",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 10.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.step,
+                ),
+            ],
+            Self::Healing(p) => vec![(
+                ParamDescriptor {
+                    name: "Brush Radius",
+                    key: "brush_radius",
+                    min: 1.0,
+                    max: 50.0,
+                    default: 5.0,
+                    step: 1.0,
+                    unit: "%",
+                },
+                p.brush_radius * 100.0,
+            )],
             Self::BlackAndWhite(p) => vec![
                 (
                     ParamDescriptor {
@@ -1074,19 +1780,662 @@ impl EditOp {
                     p.inner_brightness,
                 ),
             ],
-            Self::CropRotate(p) => vec![(
+            Self::Halation(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Threshold",
+                        key: "threshold",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 80.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.threshold,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Strength",
+                        key: "strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Spread",
+                        key: "spread",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 40.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.spread,
+                ),
+            ],
+            Self::Bloom(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Strength",
+                        key: "strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Size",
+                        key: "size",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 30.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.size,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Highlight Range",
+                        key: "highlight_range",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 70.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.highlight_range,
+                ),
+            ],
+            Self::GrainyFilm(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Grain",
+                        key: "grain",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.grain,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Style Strength",
+                        key: "style_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.style_strength,
+                ),
+            ],
+            Self::Noir(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Brightness",
+                        key: "brightness",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.brightness,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Contrast",
+                        key: "contrast",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.contrast,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Wash",
+                        key: "wash",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.wash,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Grain",
+                        key: "grain",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.grain,
+                ),
+            ],
+            Self::HdrScape(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Filter Strength",
+                        key: "filter_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.filter_strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Brightness",
+                        key: "brightness",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.brightness,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+            ],
+            Self::GlamourGlow(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Glow",
+                        key: "glow",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.glow,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Warmth",
+                        key: "warmth",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.warmth,
+                ),
+            ],
+            Self::Drama(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Filter Strength",
+                        key: "filter_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.filter_strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+            ],
+            Self::Vintage(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Brightness",
+                        key: "brightness",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.brightness,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Style Strength",
+                        key: "style_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.style_strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Vignette Strength",
+                        key: "vignette_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.vignette_strength,
+                ),
+            ],
+            Self::DoubleExposure(p) => vec![(
                 ParamDescriptor {
-                    name: "Straighten",
-                    key: "straighten",
-                    min: -45.0,
-                    max: 45.0,
+                    name: "Opacity",
+                    key: "opacity",
+                    min: 0.0,
+                    max: 100.0,
                     default: 0.0,
-                    step: 0.1,
-                    unit: "°",
+                    step: 1.0,
+                    unit: "%",
                 },
-                p.straighten_deg,
+                p.opacity,
             )],
-            Self::Curves(_) => Vec::new(),
+            Self::Retrolux(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Brightness",
+                        key: "brightness",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.brightness,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Contrast",
+                        key: "contrast",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.contrast,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Style Strength",
+                        key: "style_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.style_strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Scratches",
+                        key: "scratches",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.scratches,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Light Leaks",
+                        key: "light_leaks",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.light_leaks,
+                ),
+            ],
+            Self::Grunge(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Brightness",
+                        key: "brightness",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.brightness,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Contrast",
+                        key: "contrast",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.contrast,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Saturation",
+                        key: "saturation",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.saturation,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Texture Strength",
+                        key: "texture_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.texture_strength,
+                ),
+            ],
+            Self::LensBlur(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Blur Strength",
+                        key: "blur_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.blur_strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Transition",
+                        key: "transition",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 35.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.transition * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Bokeh Boost",
+                        key: "bokeh_boost",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.bokeh_boost,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Vignette Strength",
+                        key: "vignette_strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.vignette_strength,
+                ),
+            ],
+            Self::MotionBlur(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Strength",
+                        key: "strength",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.strength,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Angle",
+                        key: "angle",
+                        min: -180.0,
+                        max: 180.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "deg",
+                    },
+                    p.angle_deg,
+                ),
+            ],
+            Self::Portrait(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Face Spotlight",
+                        key: "face_spotlight",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.face_spotlight,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Skin Smoothing",
+                        key: "skin_smoothing",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.skin_smoothing,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Eye Clarity",
+                        key: "eye_clarity",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.eye_clarity,
+                ),
+            ],
+            Self::HeadPose(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Yaw",
+                        key: "yaw_x",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.yaw_x,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Pitch",
+                        key: "pitch_y",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.pitch_y,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Smile",
+                        key: "smile",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.smile,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Focal Length",
+                        key: "focal_length",
+                        min: -100.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "",
+                    },
+                    p.focal_length,
+                ),
+            ],
+            Self::Frames(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Width",
+                        key: "width",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.width,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Aspect Pad",
+                        key: "aspect_pad",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.aspect_pad,
+                ),
+            ],
+            Self::TextOverlay(p) => vec![
+                (
+                    ParamDescriptor {
+                        name: "Scale",
+                        key: "scale",
+                        min: 10.0,
+                        max: 300.0,
+                        default: 100.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.scale * 100.0,
+                ),
+                (
+                    ParamDescriptor {
+                        name: "Opacity",
+                        key: "opacity",
+                        min: 0.0,
+                        max: 100.0,
+                        default: 0.0,
+                        step: 1.0,
+                        unit: "%",
+                    },
+                    p.opacity,
+                ),
+            ],
         }
     }
 
@@ -1142,6 +2491,78 @@ impl EditOp {
                     p.strength = value.clamp(0.0, 100.0);
                 }
             }
+            Self::ColorGrade(p) => {
+                let wheel = match p.active_wheel {
+                    ColorWheelZone::Shadows => &mut p.shadows,
+                    ColorWheelZone::Midtones => &mut p.midtones,
+                    ColorWheelZone::Highlights => &mut p.highlights,
+                    ColorWheelZone::Global => &mut p.global,
+                };
+                match index {
+                    0 => wheel.hue_deg = value.clamp(0.0, 360.0),
+                    1 => wheel.saturation = value.clamp(0.0, 100.0),
+                    2 => wheel.luminance = value.clamp(-100.0, 100.0),
+                    3 => p.balance = value.clamp(-100.0, 100.0),
+                    4 => p.blending = value.clamp(0.0, 100.0),
+                    _ => {}
+                }
+            }
+            Self::Dehaze(p) => match index {
+                0 => p.strength = value.clamp(-100.0, 100.0),
+                1 => p.warmth_offset = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::TonalContrast(p) => match index {
+                0 => p.high_tones = value.clamp(-100.0, 100.0),
+                1 => p.mid_tones = value.clamp(-100.0, 100.0),
+                2 => p.low_tones = value.clamp(-100.0, 100.0),
+                3 => p.protect_shadows = value.clamp(0.0, 100.0),
+                4 => p.protect_highlights = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::CropRotate(p) => {
+                if index == 0 {
+                    p.straighten_deg = value.clamp(-45.0, 45.0);
+                }
+            }
+            Self::Perspective(p) => match index {
+                0 => p.vertical = value.clamp(-100.0, 100.0),
+                1 => p.horizontal = value.clamp(-100.0, 100.0),
+                2 => p.rotate_deg = value.clamp(-45.0, 45.0),
+                3 => p.scale = value.clamp(0.5, 2.0),
+                _ => {}
+            },
+            Self::Expand(p) => match index {
+                0 => p.top = (value / 100.0).clamp(0.0, 1.0),
+                1 => p.bottom = (value / 100.0).clamp(0.0, 1.0),
+                2 => p.left = (value / 100.0).clamp(0.0, 1.0),
+                3 => p.right = (value / 100.0).clamp(0.0, 1.0),
+                _ => {}
+            },
+            Self::Selective(p) => {
+                if p.active_pin < p.pins.len() {
+                    let pin = &mut p.pins[p.active_pin];
+                    match index {
+                        0 => pin.brightness = value.clamp(-100.0, 100.0),
+                        1 => pin.contrast = value.clamp(-100.0, 100.0),
+                        2 => pin.saturation = value.clamp(-100.0, 100.0),
+                        3 => pin.structure = value.clamp(-100.0, 100.0),
+                        4 => pin.radius = (value / 100.0).clamp(0.01, 1.0),
+                        _ => {}
+                    }
+                }
+            }
+            Self::Brush(p) => match index {
+                0 => p.radius = (value / 100.0).clamp(0.01, 0.5),
+                1 => p.feather = (value / 100.0).clamp(0.0, 1.0),
+                2 => p.step = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::Healing(p) => {
+                if index == 0 {
+                    p.brush_radius = (value / 100.0).clamp(0.01, 0.5);
+                }
+            }
             Self::BlackAndWhite(p) => match index {
                 0 => p.brightness = value.clamp(-100.0, 100.0),
                 1 => p.contrast = value.clamp(-100.0, 100.0),
@@ -1153,11 +2574,110 @@ impl EditOp {
                 1 => p.inner_brightness = value.clamp(-100.0, 100.0),
                 _ => {}
             },
-            Self::CropRotate(p) => {
+            Self::Halation(p) => match index {
+                0 => p.threshold = value.clamp(0.0, 100.0),
+                1 => p.strength = value.clamp(0.0, 100.0),
+                2 => p.spread = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::Bloom(p) => match index {
+                0 => p.strength = value.clamp(0.0, 100.0),
+                1 => p.size = value.clamp(0.0, 100.0),
+                2 => p.highlight_range = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::GrainyFilm(p) => match index {
+                0 => p.grain = value.clamp(0.0, 100.0),
+                1 => p.style_strength = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::Noir(p) => match index {
+                0 => p.brightness = value.clamp(-100.0, 100.0),
+                1 => p.contrast = value.clamp(-100.0, 100.0),
+                2 => p.wash = value.clamp(0.0, 100.0),
+                3 => p.grain = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::HdrScape(p) => match index {
+                0 => p.filter_strength = value.clamp(0.0, 100.0),
+                1 => p.brightness = value.clamp(-100.0, 100.0),
+                2 => p.saturation = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::GlamourGlow(p) => match index {
+                0 => p.glow = value.clamp(0.0, 100.0),
+                1 => p.saturation = value.clamp(-100.0, 100.0),
+                2 => p.warmth = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::Drama(p) => match index {
+                0 => p.filter_strength = value.clamp(0.0, 100.0),
+                1 => p.saturation = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::Vintage(p) => match index {
+                0 => p.brightness = value.clamp(-100.0, 100.0),
+                1 => p.saturation = value.clamp(-100.0, 100.0),
+                2 => p.style_strength = value.clamp(0.0, 100.0),
+                3 => p.vignette_strength = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::DoubleExposure(p) => {
                 if index == 0 {
-                    p.straighten_deg = value.clamp(-45.0, 45.0);
+                    p.opacity = value.clamp(0.0, 100.0);
                 }
             }
+            Self::Retrolux(p) => match index {
+                0 => p.brightness = value.clamp(-100.0, 100.0),
+                1 => p.saturation = value.clamp(-100.0, 100.0),
+                2 => p.contrast = value.clamp(-100.0, 100.0),
+                3 => p.style_strength = value.clamp(0.0, 100.0),
+                4 => p.scratches = value.clamp(0.0, 100.0),
+                5 => p.light_leaks = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::Grunge(p) => match index {
+                0 => p.brightness = value.clamp(-100.0, 100.0),
+                1 => p.contrast = value.clamp(-100.0, 100.0),
+                2 => p.saturation = value.clamp(-100.0, 100.0),
+                3 => p.texture_strength = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::LensBlur(p) => match index {
+                0 => p.blur_strength = value.clamp(0.0, 100.0),
+                1 => p.transition = (value / 100.0).clamp(0.0, 1.0),
+                2 => p.bokeh_boost = value.clamp(0.0, 100.0),
+                3 => p.vignette_strength = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::MotionBlur(p) => match index {
+                0 => p.strength = value.clamp(0.0, 100.0),
+                1 => p.angle_deg = value.clamp(-180.0, 180.0),
+                _ => {}
+            },
+            Self::Portrait(p) => match index {
+                0 => p.face_spotlight = value.clamp(0.0, 100.0),
+                1 => p.skin_smoothing = value.clamp(0.0, 100.0),
+                2 => p.eye_clarity = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::HeadPose(p) => match index {
+                0 => p.yaw_x = value.clamp(-100.0, 100.0),
+                1 => p.pitch_y = value.clamp(-100.0, 100.0),
+                2 => p.smile = value.clamp(-100.0, 100.0),
+                3 => p.focal_length = value.clamp(-100.0, 100.0),
+                _ => {}
+            },
+            Self::Frames(p) => match index {
+                0 => p.width = value.clamp(0.0, 100.0),
+                1 => p.aspect_pad = value.clamp(0.0, 100.0),
+                _ => {}
+            },
+            Self::TextOverlay(p) => match index {
+                0 => p.scale = (value / 100.0).clamp(0.1, 3.0),
+                1 => p.opacity = value.clamp(0.0, 100.0),
+                _ => {}
+            },
             Self::Curves(_) => {}
         }
     }

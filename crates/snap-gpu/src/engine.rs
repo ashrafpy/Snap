@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use snap_core::curves::CurvesParams;
 use snap_core::image_types::{HistogramData, LinearImage, Lut3D};
+use snap_core::mask::{BrushMap, LayerMask};
 use snap_core::ops::{CropRotateParams, EditOp};
+use snap_core::ops_ext::*;
 use snap_core::stack::{EditNode, EditStack};
 use wgpu::util::DeviceExt;
 
 use crate::error::GpuError;
 use crate::lut_cache::GpuLutCache;
 use crate::shaders::*;
+use crate::shaders_p2::*;
+use crate::shaders_p3_p4::*;
 use crate::types::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +21,9 @@ struct NodeFingerprint {
     opacity: u32, // quantized opacity for stable hash
     op_tag: &'static str,
     payload_hash: u64,
+    mask_hash: Option<u64>,
+    brush_hash: u64,
+    secondary_gen: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +52,8 @@ pub struct GpuPipelineEngine {
     view_b: Option<wgpu::TextureView>,
     tex_temp: Option<wgpu::Texture>,
     view_temp: Option<wgpu::TextureView>,
+    tex_pre: Option<wgpu::Texture>,
+    view_pre: Option<wgpu::TextureView>,
     allocated_dims: (u32, u32),
 
     // Samplers
@@ -64,8 +73,10 @@ pub struct GpuPipelineEngine {
     histogram_bgl: wgpu::BindGroupLayout,
     crop_transform_bgl: wgpu::BindGroupLayout,
     viewport_bgl: wgpu::BindGroupLayout,
+    brush_bgl: wgpu::BindGroupLayout,
+    mask_blend_bgl: wgpu::BindGroupLayout,
 
-    // Compute pipelines
+    // Compute pipelines (Phase 1)
     raw_develop_pipeline: wgpu::ComputePipeline,
     white_balance_pipeline: wgpu::ComputePipeline,
     tune_image_pipeline: wgpu::ComputePipeline,
@@ -77,6 +88,51 @@ pub struct GpuPipelineEngine {
     vignette_pipeline: wgpu::ComputePipeline,
     histogram_pipeline: wgpu::ComputePipeline,
     crop_transform_pipeline: wgpu::ComputePipeline,
+
+    // Compute pipelines (Phase 2)
+    color_grade_pipeline: wgpu::ComputePipeline,
+    dehaze_pipeline: wgpu::ComputePipeline,
+    tonal_contrast_pipeline: wgpu::ComputePipeline,
+    halation_pipeline: wgpu::ComputePipeline,
+    bloom_pipeline: wgpu::ComputePipeline,
+    grainy_film_pipeline: wgpu::ComputePipeline,
+    noir_pipeline: wgpu::ComputePipeline,
+    selective_pipeline: wgpu::ComputePipeline,
+    brush_pipeline: wgpu::ComputePipeline,
+    mask_blend_pipeline: wgpu::ComputePipeline,
+
+    // Compute pipelines (Phase 3 & 4)
+    healing_pipeline: wgpu::ComputePipeline,
+    perspective_pipeline: wgpu::ComputePipeline,
+    expand_pipeline: wgpu::ComputePipeline,
+    lens_blur_pipeline: wgpu::ComputePipeline,
+    motion_blur_pipeline: wgpu::ComputePipeline,
+    hdr_scape_pipeline: wgpu::ComputePipeline,
+    glamour_glow_pipeline: wgpu::ComputePipeline,
+    drama_pipeline: wgpu::ComputePipeline,
+    vintage_pipeline: wgpu::ComputePipeline,
+    retrolux_pipeline: wgpu::ComputePipeline,
+    grunge_pipeline: wgpu::ComputePipeline,
+    portrait_pipeline: wgpu::ComputePipeline,
+    head_pose_pipeline: wgpu::ComputePipeline,
+    frames_pipeline: wgpu::ComputePipeline,
+    double_exposure_pipeline: wgpu::ComputePipeline,
+    text_overlay_pipeline: wgpu::ComputePipeline,
+
+    // Auxiliary caches
+    secondary_images: HashMap<String, (u64, wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+    secondary_hashes: HashMap<String, u64>,
+    secondary_images_order: Vec<String>,
+    secondary_gen_counter: u64,
+    _fallback_black_tex: wgpu::Texture,
+    fallback_black_view: wgpu::TextureView,
+
+    mask_cache: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
+    mask_cache_order: Vec<u64>,
+    brush_cache: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
+    brush_cache_order: Vec<u64>,
+    text_cache: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
+    text_cache_order: Vec<u64>,
 
     // Viewport render pipelines cached per target format
     viewport_shader_module: wgpu::ShaderModule,
@@ -372,6 +428,142 @@ impl GpuPipelineEngine {
             ],
         });
 
+        let brush_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("brush_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let mask_blend_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mask_blend_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let fallback_black_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gpu_fallback_black_tex"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let black_row = [0u8; 256];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_black_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &black_row,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_black_view = fallback_black_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         // Helper to compile compute pipeline
         let create_compute = |label: &str, bgl: &wgpu::BindGroupLayout, code: &str, entry: &str| {
             let full_code = format!("{}\n{}", COMMON_WGSL, code);
@@ -405,6 +597,36 @@ impl GpuPipelineEngine {
         let vignette_pipeline = create_compute("vignette_pipeline", &compute_bgl, VIGNETTE_WGSL, "cs_vignette");
         let histogram_pipeline = create_compute("histogram_pipeline", &histogram_bgl, HISTOGRAM_WGSL, "cs_histogram");
         let crop_transform_pipeline = create_compute("crop_transform_pipeline", &crop_transform_bgl, CROP_TRANSFORM_WGSL, "cs_crop_transform");
+
+        // Phase 2 compute pipelines
+        let color_grade_pipeline = create_compute("color_grade_pipeline", &compute_bgl, COLOR_GRADE_WGSL, "cs_color_grade");
+        let dehaze_pipeline = create_compute("dehaze_pipeline", &compute_bgl, DEHAZE_WGSL, "cs_dehaze");
+        let tonal_contrast_pipeline = create_compute("tonal_contrast_pipeline", &compute_bgl, TONAL_CONTRAST_WGSL, "cs_tonal_contrast");
+        let halation_pipeline = create_compute("halation_pipeline", &compute_bgl, HALATION_WGSL, "cs_halation");
+        let bloom_pipeline = create_compute("bloom_pipeline", &compute_bgl, BLOOM_WGSL, "cs_bloom");
+        let grainy_film_pipeline = create_compute("grainy_film_pipeline", &compute_bgl, GRAINY_FILM_WGSL, "cs_grainy_film");
+        let noir_pipeline = create_compute("noir_pipeline", &compute_bgl, NOIR_WGSL, "cs_noir");
+        let selective_pipeline = create_compute("selective_pipeline", &compute_bgl, SELECTIVE_WGSL, "cs_selective");
+        let brush_pipeline = create_compute("brush_pipeline", &brush_bgl, BRUSH_WGSL, "cs_brush");
+        let mask_blend_pipeline = create_compute("mask_blend_pipeline", &mask_blend_bgl, MASK_BLEND_WGSL, "cs_mask_blend");
+
+        // Phase 3 & 4 compute pipelines
+        let healing_pipeline = create_compute("healing_pipeline", &compute_bgl, HEALING_WGSL, "cs_healing");
+        let perspective_pipeline = create_compute("perspective_pipeline", &compute_bgl, PERSPECTIVE_WGSL, "cs_perspective");
+        let expand_pipeline = create_compute("expand_pipeline", &compute_bgl, EXPAND_WGSL, "cs_expand");
+        let lens_blur_pipeline = create_compute("lens_blur_pipeline", &compute_bgl, LENS_BLUR_WGSL, "cs_lens_blur");
+        let motion_blur_pipeline = create_compute("motion_blur_pipeline", &compute_bgl, MOTION_BLUR_WGSL, "cs_motion_blur");
+        let hdr_scape_pipeline = create_compute("hdr_scape_pipeline", &compute_bgl, HDR_SCAPE_WGSL, "cs_hdr_scape");
+        let glamour_glow_pipeline = create_compute("glamour_glow_pipeline", &compute_bgl, GLAMOUR_GLOW_WGSL, "cs_glamour_glow");
+        let drama_pipeline = create_compute("drama_pipeline", &compute_bgl, DRAMA_WGSL, "cs_drama");
+        let vintage_pipeline = create_compute("vintage_pipeline", &compute_bgl, VINTAGE_WGSL, "cs_vintage");
+        let retrolux_pipeline = create_compute("retrolux_pipeline", &compute_bgl, RETROLUX_WGSL, "cs_retrolux");
+        let grunge_pipeline = create_compute("grunge_pipeline", &compute_bgl, GRUNGE_WGSL, "cs_grunge");
+        let portrait_pipeline = create_compute("portrait_pipeline", &compute_bgl, PORTRAIT_WGSL, "cs_portrait");
+        let head_pose_pipeline = create_compute("head_pose_pipeline", &compute_bgl, HEAD_POSE_WGSL, "cs_head_pose");
+        let frames_pipeline = create_compute("frames_pipeline", &compute_bgl, FRAMES_WGSL, "cs_frames");
+        let double_exposure_pipeline = create_compute("double_exposure_pipeline", &curves_bgl, DOUBLE_EXPOSURE_WGSL, "cs_double_exposure");
+        let text_overlay_pipeline = create_compute("text_overlay_pipeline", &curves_bgl, TEXT_OVERLAY_WGSL, "cs_text_overlay");
 
         // Viewport shader and layout
         let full_viewport_code = format!("{}\n{}", COMMON_WGSL, VIEWPORT_WGSL);
@@ -440,6 +662,8 @@ impl GpuPipelineEngine {
             view_b: None,
             tex_temp: None,
             view_temp: None,
+            tex_pre: None,
+            view_pre: None,
             allocated_dims: (0, 0),
             linear_clamp_sampler,
             viewport_buf,
@@ -451,6 +675,8 @@ impl GpuPipelineEngine {
             histogram_bgl,
             crop_transform_bgl,
             viewport_bgl,
+            brush_bgl,
+            mask_blend_bgl,
             raw_develop_pipeline,
             white_balance_pipeline,
             tune_image_pipeline,
@@ -462,6 +688,44 @@ impl GpuPipelineEngine {
             vignette_pipeline,
             histogram_pipeline,
             crop_transform_pipeline,
+            color_grade_pipeline,
+            dehaze_pipeline,
+            tonal_contrast_pipeline,
+            halation_pipeline,
+            bloom_pipeline,
+            grainy_film_pipeline,
+            noir_pipeline,
+            selective_pipeline,
+            brush_pipeline,
+            mask_blend_pipeline,
+            healing_pipeline,
+            perspective_pipeline,
+            expand_pipeline,
+            lens_blur_pipeline,
+            motion_blur_pipeline,
+            hdr_scape_pipeline,
+            glamour_glow_pipeline,
+            drama_pipeline,
+            vintage_pipeline,
+            retrolux_pipeline,
+            grunge_pipeline,
+            portrait_pipeline,
+            head_pose_pipeline,
+            frames_pipeline,
+            double_exposure_pipeline,
+            text_overlay_pipeline,
+            secondary_images: HashMap::new(),
+            secondary_hashes: HashMap::new(),
+            secondary_images_order: Vec::new(),
+            secondary_gen_counter: 0,
+            _fallback_black_tex: fallback_black_tex,
+            fallback_black_view,
+            mask_cache: HashMap::new(),
+            mask_cache_order: Vec::new(),
+            brush_cache: HashMap::new(),
+            brush_cache_order: Vec::new(),
+            text_cache: HashMap::new(),
+            text_cache_order: Vec::new(),
             viewport_shader_module,
             viewport_pipeline_layout,
             viewport_pipelines,
@@ -584,7 +848,7 @@ impl GpuPipelineEngine {
     }
 
     fn ensure_ping_pong_textures(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if self.allocated_dims == (width, height) && self.tex_a.is_some() {
+        if self.allocated_dims == (width, height) && self.tex_a.is_some() && self.tex_pre.is_some() {
             return;
         }
 
@@ -614,14 +878,261 @@ impl GpuPipelineEngine {
         let (b_tex, b_view) = create_tex("gpu_tex_b");
         let (temp_tex, temp_view) = create_tex("gpu_tex_temp");
 
+        let pre_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gpu_tex_pre"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let pre_view = pre_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         self.tex_a = Some(a_tex);
         self.view_a = Some(a_view);
         self.tex_b = Some(b_tex);
         self.view_b = Some(b_view);
         self.tex_temp = Some(temp_tex);
         self.view_temp = Some(temp_view);
+        self.tex_pre = Some(pre_tex);
+        self.view_pre = Some(pre_view);
         self.allocated_dims = (width, height);
         self.last_dirty_key = None;
+    }
+
+    /// Upload a secondary image for Double Exposure operations.
+    pub fn upload_secondary_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path_key: &str,
+        image: &LinearImage,
+    ) {
+        let dims = (image.width, image.height);
+        let sample_hash = {
+            let len = image.pixels.len();
+            if len == 0 {
+                0u64
+            } else {
+                let mut h = len as u64;
+                let p0 = image.pixels[0];
+                let p_mid = image.pixels[len / 2];
+                let p_last = image.pixels[len - 1];
+                h ^= (p0[0].to_bits() as u64) | ((p0[1].to_bits() as u64) << 16) | ((p0[2].to_bits() as u64) << 32);
+                h = h.wrapping_mul(0x100000001b3);
+                h ^= (p_mid[0].to_bits() as u64) | ((p_mid[1].to_bits() as u64) << 16) | ((p_mid[2].to_bits() as u64) << 32);
+                h = h.wrapping_mul(0x100000001b3);
+                h ^= (p_last[0].to_bits() as u64) | ((p_last[1].to_bits() as u64) << 16) | ((p_last[2].to_bits() as u64) << 32);
+                h
+            }
+        };
+
+        if let Some((_, _, _, existing_dims)) = self.secondary_images.get(path_key) {
+            if *existing_dims == dims && self.secondary_hashes.get(path_key) == Some(&sample_hash) {
+                return;
+            }
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("gpu_secondary_image_{}", path_key)),
+            size: wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let raw_bytes: &[u8] = bytemuck::cast_slice(&image.pixels);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            raw_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width * 8),
+                rows_per_image: Some(image.height),
+            },
+            wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.secondary_gen_counter = self.secondary_gen_counter.wrapping_add(1);
+
+        if self.secondary_images.len() >= 32 && !self.secondary_images.contains_key(path_key) {
+            if let Some(oldest) = self.secondary_images_order.first().cloned() {
+                self.secondary_images.remove(&oldest);
+                self.secondary_hashes.remove(&oldest);
+                self.secondary_images_order.retain(|k| k != &oldest);
+            }
+        }
+
+        self.secondary_images.insert(
+            path_key.to_string(),
+            (self.secondary_gen_counter, texture, view, dims),
+        );
+        self.secondary_hashes.insert(path_key.to_string(), sample_hash);
+        if !self.secondary_images_order.contains(&path_key.to_string()) {
+            self.secondary_images_order.push(path_key.to_string());
+        }
+    }
+
+    fn ensure_mask(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mask: &LayerMask) {
+        let hash = mask.content_hash();
+        if !self.mask_cache.contains_key(&hash) {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("gpu_layer_mask_tex"),
+                size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                mask.as_bytes(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            );
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            if self.mask_cache.len() >= 64 {
+                if let Some(oldest) = self.mask_cache_order.first().copied() {
+                    self.mask_cache.remove(&oldest);
+                    self.mask_cache_order.retain(|&k| k != oldest);
+                }
+            }
+            self.mask_cache.insert(hash, (tex, view));
+            self.mask_cache_order.push(hash);
+        }
+    }
+
+    fn ensure_brush_map(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, map: &BrushMap) {
+        let hash = map.content_hash();
+        if !self.brush_cache.contains_key(&hash) {
+            let f32_vec = map.to_f32_vec();
+            let raw_bytes: &[u8] = bytemuck::cast_slice(&f32_vec);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("gpu_brush_map_tex"),
+                size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                raw_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256 * 4),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            );
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            if self.brush_cache.len() >= 64 {
+                if let Some(oldest) = self.brush_cache_order.first().copied() {
+                    self.brush_cache.remove(&oldest);
+                    self.brush_cache_order.retain(|&k| k != oldest);
+                }
+            }
+            self.brush_cache.insert(hash, (tex, view));
+            self.brush_cache_order.push(hash);
+        }
+    }
+
+    fn ensure_text_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        params: &TextOverlayParams,
+        width: u32,
+        height: u32,
+    ) {
+        let aspect = width as f32 / (height.max(1) as f32);
+        let hash = crate::text_raster::compute_text_cache_key(params) ^ (aspect.to_bits() as u64);
+        if !self.text_cache.contains_key(&hash) {
+            let raster = crate::text_raster::rasterize_text_overlay(params, aspect);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("gpu_text_overlay_tex"),
+                size: wgpu::Extent3d {
+                    width: raster.width,
+                    height: raster.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &raster.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(raster.width * 4),
+                    rows_per_image: Some(raster.height),
+                },
+                wgpu::Extent3d {
+                    width: raster.width,
+                    height: raster.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            if self.text_cache.len() >= 64 {
+                if let Some(oldest) = self.text_cache_order.first().copied() {
+                    self.text_cache.remove(&oldest);
+                    self.text_cache_order.retain(|&k| k != oldest);
+                }
+            }
+            self.text_cache.insert(hash, (tex, view));
+            self.text_cache_order.push(hash);
+        }
     }
 
     fn create_curve_texture(
@@ -691,30 +1202,74 @@ impl GpuPipelineEngine {
         let node_fingerprints: Vec<NodeFingerprint> = effective_nodes
             .iter()
             .map(|n| {
-                let op_tag = match &n.op {
-                    EditOp::RawDevelop(_) => "raw",
-                    EditOp::WhiteBalance(_) => "wb",
-                    EditOp::TuneImage(_) => "tune",
-                    EditOp::ColorHsl(_) => "hsl",
-                    EditOp::Curves(_) => "curves",
-                    EditOp::Lut3d(_) => "lut",
-                    EditOp::Details(_) => "details",
-                    EditOp::BlackAndWhite(_) => "bw",
-                    EditOp::Vignette(_) => "vig",
-                    EditOp::CropRotate(_) => "crop",
+                let (op_tag, brush_hash, secondary_gen) = match &n.op {
+                    EditOp::RawDevelop(_) => ("raw", 0, 0),
+                    EditOp::WhiteBalance(_) => ("wb", 0, 0),
+                    EditOp::TuneImage(_) => ("tune", 0, 0),
+                    EditOp::ColorHsl(_) => ("hsl", 0, 0),
+                    EditOp::Curves(_) => ("curves", 0, 0),
+                    EditOp::Lut3d(_) => ("lut", 0, 0),
+                    EditOp::Details(_) => ("details", 0, 0),
+                    EditOp::BlackAndWhite(_) => ("bw", 0, 0),
+                    EditOp::Vignette(_) => ("vig", 0, 0),
+                    EditOp::CropRotate(_) => ("crop", 0, 0),
+
+                    EditOp::ColorGrade(_) => ("color_grade", 0, 0),
+                    EditOp::Dehaze(_) => ("dehaze", 0, 0),
+                    EditOp::TonalContrast(_) => ("tonal_contrast", 0, 0),
+                    EditOp::Selective(_) => ("selective", 0, 0),
+                    EditOp::Brush(p) => ("brush", p.map.content_hash(), 0),
+                    EditOp::Healing(_) => ("healing", 0, 0),
+
+                    EditOp::Halation(_) => ("halation", 0, 0),
+                    EditOp::Bloom(_) => ("bloom", 0, 0),
+                    EditOp::GrainyFilm(_) => ("grainy_film", 0, 0),
+                    EditOp::Noir(_) => ("noir", 0, 0),
+                    EditOp::HdrScape(_) => ("hdr_scape", 0, 0),
+                    EditOp::GlamourGlow(_) => ("glamour_glow", 0, 0),
+                    EditOp::Drama(_) => ("drama", 0, 0),
+                    EditOp::Vintage(_) => ("vintage", 0, 0),
+                    EditOp::DoubleExposure(p) => {
+                        let sec_gen = p
+                            .secondary_path
+                            .as_ref()
+                            .and_then(|path| self.secondary_images.get(path))
+                            .map(|(g, _, _, _)| *g)
+                            .unwrap_or(0);
+                        ("double_exposure", 0, sec_gen)
+                    }
+                    EditOp::Retrolux(_) => ("retrolux", 0, 0),
+                    EditOp::Grunge(_) => ("grunge", 0, 0),
+
+                    EditOp::Perspective(_) => ("perspective", 0, 0),
+                    EditOp::Expand(_) => ("expand", 0, 0),
+                    EditOp::LensBlur(_) => ("lens_blur", 0, 0),
+                    EditOp::MotionBlur(_) => ("motion_blur", 0, 0),
+
+                    EditOp::Portrait(_) => ("portrait", 0, 0),
+                    EditOp::HeadPose(_) => ("head_pose", 0, 0),
+                    EditOp::Frames(_) => ("frames", 0, 0),
+                    EditOp::TextOverlay(_) => ("text_overlay", 0, 0),
                 };
+
+                let mask_hash = n.mask.as_ref().map(|m| m.content_hash());
+
                 // Stable payload hash via string representation
                 let s = format!("{:?}", n.op);
                 let mut hash = 0xcbf29ce484222325u64;
                 for b in s.as_bytes() {
                     hash = (hash ^ (*b as u64)).wrapping_mul(0x100000001b3);
                 }
+
                 NodeFingerprint {
                     id: *n.id.as_bytes(),
                     enabled: n.enabled,
                     opacity: (n.opacity * 1000.0).round() as u32,
                     op_tag,
                     payload_hash: hash,
+                    mask_hash,
+                    brush_hash,
+                    secondary_gen,
                 }
             })
             .collect();
@@ -743,13 +1298,29 @@ impl GpuPipelineEngine {
         // We have active edits to evaluate
         self.ensure_ping_pong_textures(device, width, height);
 
+        // Pre-upload any masks, brush maps, or text overlays required by active nodes
+        for node in &effective_nodes {
+            if let Some(mask) = &node.mask {
+                if !mask.is_uniform_full() {
+                    self.ensure_mask(device, queue, mask);
+                }
+            }
+            match &node.op {
+                EditOp::Brush(p) => {
+                    self.ensure_brush_map(device, queue, &p.map);
+                }
+                EditOp::TextOverlay(p) => {
+                    self.ensure_text_overlay(device, queue, p, width, height);
+                }
+                _ => {}
+            }
+        }
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("gpu_process_stack_encoder"),
         });
 
-        // Current ping-pong state
-        // ping = true means read from tex_a, write to tex_b
-        // ping = false means read from tex_b, write to tex_a
+        // Ping-pong state tracking
         let mut first_pass = true;
         let mut in_a = false;
 
@@ -760,19 +1331,138 @@ impl GpuPipelineEngine {
         let mut retained_textures = Vec::new();
 
         for node in &effective_nodes {
-            let opacity = node.opacity.clamp(0.0, 1.0);
+            if matches!(node.op, EditOp::CropRotate(_)) {
+                continue;
+            }
 
-            let (src_view, dst_view) = if first_pass {
-                (self.source_view.as_ref().unwrap(), self.view_a.as_ref().unwrap())
+            let opacity = node.opacity.clamp(0.0, 1.0);
+            let has_custom_mask = node.mask.as_ref().is_some_and(|m| !m.is_uniform_full());
+            let op_opacity = if has_custom_mask { 1.0 } else { opacity };
+
+            let (src_view, src_tex) = if first_pass {
+                (self.source_view.as_ref().unwrap(), self.source_texture.as_ref().unwrap())
             } else if in_a {
-                (self.view_a.as_ref().unwrap(), self.view_b.as_ref().unwrap())
+                (self.view_a.as_ref().unwrap(), self.tex_a.as_ref().unwrap())
             } else {
-                (self.view_b.as_ref().unwrap(), self.view_a.as_ref().unwrap())
+                (self.view_b.as_ref().unwrap(), self.tex_b.as_ref().unwrap())
             };
+
+            let (post_view, other_view, is_other_view_a) = if first_pass {
+                (self.view_a.as_ref().unwrap(), self.view_b.as_ref().unwrap(), false)
+            } else if in_a {
+                (self.view_b.as_ref().unwrap(), self.view_a.as_ref().unwrap(), true)
+            } else {
+                (self.view_a.as_ref().unwrap(), self.view_b.as_ref().unwrap(), false)
+            };
+
+            let dst_view = post_view;
+
+            if has_custom_mask {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: src_tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: self.tex_pre.as_ref().unwrap(),
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+
+            macro_rules! dispatch_compute_bgl {
+                ($pipeline:expr, $uniforms:expr, $label:expr) => {{
+                    let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(concat!("gpu_", $label, "_buf")),
+                        contents: bytemuck::bytes_of(&$uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(concat!($label, "_bg")),
+                        layout: &self.compute_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
+                            wgpu::BindGroupEntry { binding: 2, resource: buf.as_entire_binding() },
+                        ],
+                    });
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some(concat!($label, "_cpass")),
+                        timestamp_writes: None,
+                    });
+                    cpass.set_pipeline($pipeline);
+                    cpass.set_bind_group(0, &bg, &[]);
+                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
+                    retained_buffers.push(buf);
+                }};
+            }
+
+            macro_rules! dispatch_separable_bgl {
+                ($pipeline:expr, $u1:expr, $u2:expr, $label:expr) => {{
+                    let buf1 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(concat!("gpu_", $label, "_buf_pass1")),
+                        contents: bytemuck::bytes_of(&$u1),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(concat!($label, "_bg_pass1")),
+                        layout: &self.compute_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
+                            wgpu::BindGroupEntry { binding: 2, resource: buf1.as_entire_binding() },
+                        ],
+                    });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some(concat!($label, "_cpass1")),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline($pipeline);
+                        cpass.set_bind_group(0, &bg1, &[]);
+                        cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    }
+                    let buf2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(concat!("gpu_", $label, "_buf_pass2")),
+                        contents: bytemuck::bytes_of(&$u2),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(concat!($label, "_bg_pass2")),
+                        layout: &self.compute_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
+                            wgpu::BindGroupEntry { binding: 2, resource: buf2.as_entire_binding() },
+                        ],
+                    });
+                    {
+                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some(concat!($label, "_cpass2")),
+                            timestamp_writes: None,
+                        });
+                        cpass.set_pipeline($pipeline);
+                        cpass.set_bind_group(0, &bg2, &[]);
+                        cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    }
+                    retained_buffers.push(buf1);
+                    retained_buffers.push(buf2);
+                }};
+            }
 
             match &node.op {
                 EditOp::RawDevelop(p) => {
-                    let uniforms = RawDevelopUniforms {
+                    let u = RawDevelopUniforms {
                         exposure_ev: p.exposure_ev,
                         highlights: p.highlights,
                         shadows: p.shadows,
@@ -780,71 +1470,23 @@ impl GpuPipelineEngine {
                         temperature: p.temperature,
                         tint: p.tint,
                         saturation: p.saturation,
-                        opacity,
+                        opacity: op_opacity,
                     };
-                    let raw_develop_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_raw_develop_buf"),
-                        contents: bytemuck::bytes_of(&uniforms),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("raw_develop_bg"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: raw_develop_buf.as_entire_binding() },
-                        ],
-                    });
-
-                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("raw_develop_cpass"),
-                        timestamp_writes: None,
-                    });
-                    cpass.set_pipeline(&self.raw_develop_pipeline);
-                    cpass.set_bind_group(0, &bg, &[]);
-                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-
-                    retained_buffers.push(raw_develop_buf);
+                    dispatch_compute_bgl!(&self.raw_develop_pipeline, u, "raw_develop");
                 }
 
                 EditOp::WhiteBalance(p) => {
-                    let uniforms = WhiteBalanceUniforms {
+                    let u = WhiteBalanceUniforms {
                         temperature: p.temperature,
                         tint: p.tint,
-                        opacity,
+                        opacity: op_opacity,
                         _pad: 0.0,
                     };
-                    let white_balance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_white_balance_buf"),
-                        contents: bytemuck::bytes_of(&uniforms),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("white_balance_bg"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: white_balance_buf.as_entire_binding() },
-                        ],
-                    });
-
-                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("white_balance_cpass"),
-                        timestamp_writes: None,
-                    });
-                    cpass.set_pipeline(&self.white_balance_pipeline);
-                    cpass.set_bind_group(0, &bg, &[]);
-                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-
-                    retained_buffers.push(white_balance_buf);
+                    dispatch_compute_bgl!(&self.white_balance_pipeline, u, "white_balance");
                 }
 
                 EditOp::TuneImage(p) => {
-                    let uniforms = TuneImageUniforms {
+                    let u = TuneImageUniforms {
                         brightness: p.brightness,
                         contrast: p.contrast,
                         saturation: p.saturation,
@@ -852,33 +1494,9 @@ impl GpuPipelineEngine {
                         highlights: p.highlights,
                         shadows: p.shadows,
                         warmth: p.warmth,
-                        opacity,
+                        opacity: op_opacity,
                     };
-                    let tune_image_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_tune_image_buf"),
-                        contents: bytemuck::bytes_of(&uniforms),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("tune_image_bg"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: tune_image_buf.as_entire_binding() },
-                        ],
-                    });
-
-                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("tune_image_cpass"),
-                        timestamp_writes: None,
-                    });
-                    cpass.set_pipeline(&self.tune_image_pipeline);
-                    cpass.set_bind_group(0, &bg, &[]);
-                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-
-                    retained_buffers.push(tune_image_buf);
+                    dispatch_compute_bgl!(&self.tune_image_pipeline, u, "tune_image");
                 }
 
                 EditOp::ColorHsl(p) => {
@@ -888,44 +1506,186 @@ impl GpuPipelineEngine {
                         bands_gpu[i].saturation = p.bands[i].saturation;
                         bands_gpu[i].luminance = p.bands[i].luminance;
                     }
-                    let uniforms = ColorHslUniforms {
+                    let u = ColorHslUniforms {
                         bands: bands_gpu,
-                        opacity,
+                        opacity: op_opacity,
                         _pad0: 0.0,
                         _pad1: 0.0,
                         _pad2: 0.0,
                     };
-                    let color_hsl_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_color_hsl_buf"),
-                        contents: bytemuck::bytes_of(&uniforms),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("color_hsl_bg"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: color_hsl_buf.as_entire_binding() },
-                        ],
-                    });
-
-                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("color_hsl_cpass"),
-                        timestamp_writes: None,
-                    });
-                    cpass.set_pipeline(&self.color_hsl_pipeline);
-                    cpass.set_bind_group(0, &bg, &[]);
-                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-
-                    retained_buffers.push(color_hsl_buf);
+                    dispatch_compute_bgl!(&self.color_hsl_pipeline, u, "color_hsl");
                 }
 
+                EditOp::BlackAndWhite(p) => {
+                    let u = BlackAndWhiteUniforms {
+                        channel_weights: p.color_filter.channel_weights(),
+                        brightness: p.brightness,
+                        contrast: p.contrast,
+                        grain: p.grain,
+                        opacity: op_opacity,
+                        _pad: 0.0,
+                    };
+                    dispatch_compute_bgl!(&self.black_and_white_pipeline, u, "black_and_white");
+                }
+
+                EditOp::Vignette(p) => {
+                    let u = VignetteUniforms {
+                        center: p.center,
+                        inner_radius: p.inner_radius,
+                        outer_radius: p.outer_radius,
+                        outer_brightness: p.outer_brightness,
+                        inner_brightness: p.inner_brightness,
+                        aspect: width as f32 / height as f32,
+                        opacity: op_opacity,
+                    };
+                    dispatch_compute_bgl!(&self.vignette_pipeline, u, "vignette");
+                }
+
+                EditOp::ColorGrade(p) => {
+                    let u = ColorGradeUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.color_grade_pipeline, u, "color_grade");
+                }
+
+                EditOp::Dehaze(p) => {
+                    let u = DehazeUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.dehaze_pipeline, u, "dehaze");
+                }
+
+                EditOp::GrainyFilm(p) => {
+                    let u = GrainyFilmUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.grainy_film_pipeline, u, "grainy_film");
+                }
+
+                EditOp::Noir(p) => {
+                    let u = NoirUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.noir_pipeline, u, "noir");
+                }
+
+                EditOp::Selective(p) => {
+                    let u = SelectiveUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.selective_pipeline, u, "selective");
+                }
+
+                EditOp::Healing(p) => {
+                    let u = HealingUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.healing_pipeline, u, "healing");
+                }
+
+                EditOp::Perspective(p) => {
+                    let u = PerspectiveUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.perspective_pipeline, u, "perspective");
+                }
+
+                EditOp::Expand(p) => {
+                    let u = ExpandUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.expand_pipeline, u, "expand");
+                }
+
+                EditOp::LensBlur(p) => {
+                    let u = LensBlurUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.lens_blur_pipeline, u, "lens_blur");
+                }
+
+                EditOp::MotionBlur(p) => {
+                    let u = MotionBlurUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.motion_blur_pipeline, u, "motion_blur");
+                }
+
+                EditOp::Drama(p) => {
+                    let u = DramaUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.drama_pipeline, u, "drama");
+                }
+
+                EditOp::Vintage(p) => {
+                    let u = VintageUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.vintage_pipeline, u, "vintage");
+                }
+
+                EditOp::Retrolux(p) => {
+                    let u = RetroluxUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.retrolux_pipeline, u, "retrolux");
+                }
+
+                EditOp::Grunge(p) => {
+                    let u = GrungeUniforms::from_params(p, op_opacity);
+                    dispatch_compute_bgl!(&self.grunge_pipeline, u, "grunge");
+                }
+
+                EditOp::Portrait(p) => {
+                    let u = PortraitUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.portrait_pipeline, u, "portrait");
+                }
+
+                EditOp::HeadPose(p) => {
+                    let u = HeadPoseUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.head_pose_pipeline, u, "head_pose");
+                }
+
+                EditOp::Frames(p) => {
+                    let u = FramesUniforms::from_params(p, width, height, op_opacity);
+                    dispatch_compute_bgl!(&self.frames_pipeline, u, "frames");
+                }
+
+                // 6 Separable 2-Pass Ops:
+                EditOp::Details(p) => {
+                    let u1 = DetailsUniforms {
+                        structure: p.structure,
+                        sharpening: p.sharpening,
+                        opacity: op_opacity,
+                        pass_idx: 0,
+                        width: width as f32,
+                        height: height as f32,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                    };
+                    let u2 = DetailsUniforms {
+                        structure: p.structure,
+                        sharpening: p.sharpening,
+                        opacity: op_opacity,
+                        pass_idx: 1,
+                        width: width as f32,
+                        height: height as f32,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                    };
+                    dispatch_separable_bgl!(&self.details_pipeline, u1, u2, "details");
+                }
+
+                EditOp::TonalContrast(p) => {
+                    let u1 = TonalContrastUniforms::from_params(p, op_opacity, 0);
+                    let u2 = TonalContrastUniforms::from_params(p, op_opacity, 1);
+                    dispatch_separable_bgl!(&self.tonal_contrast_pipeline, u1, u2, "tonal_contrast");
+                }
+
+                EditOp::Halation(p) => {
+                    let u1 = HalationUniforms::from_params(p, op_opacity, 0);
+                    let u2 = HalationUniforms::from_params(p, op_opacity, 1);
+                    dispatch_separable_bgl!(&self.halation_pipeline, u1, u2, "halation");
+                }
+
+                EditOp::Bloom(p) => {
+                    let u1 = BloomUniforms::from_params(p, op_opacity, 0);
+                    let u2 = BloomUniforms::from_params(p, op_opacity, 1);
+                    dispatch_separable_bgl!(&self.bloom_pipeline, u1, u2, "bloom");
+                }
+
+                EditOp::HdrScape(p) => {
+                    let u1 = HdrScapeUniforms::from_params(p, 0, op_opacity);
+                    let u2 = HdrScapeUniforms::from_params(p, 1, op_opacity);
+                    dispatch_separable_bgl!(&self.hdr_scape_pipeline, u1, u2, "hdr_scape");
+                }
+
+                EditOp::GlamourGlow(p) => {
+                    let u1 = GlamourGlowUniforms::from_params(p, 0, op_opacity);
+                    let u2 = GlamourGlowUniforms::from_params(p, 1, op_opacity);
+                    dispatch_separable_bgl!(&self.glamour_glow_pipeline, u1, u2, "glamour_glow");
+                }
+
+                // Custom BGL Ops:
                 EditOp::Curves(p) => {
                     let (curve_texture, curve_view) = Self::create_curve_texture(device, queue, p);
                     let uniforms = CurvesUniforms {
-                        opacity,
+                        opacity: op_opacity,
                         _pad0: 0.0,
                         _pad1: 0.0,
                         _pad2: 0.0,
@@ -955,6 +1715,7 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.curves_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
 
                     retained_textures.push(curve_texture);
                     retained_buffers.push(curves_buf);
@@ -976,7 +1737,7 @@ impl GpuPipelineEngine {
                         domain_max: gpu_lut.domain_max,
                         strength: p.strength,
                         input_space: input_space_u32,
-                        opacity,
+                        opacity: op_opacity,
                         _pad0: 0.0,
                         _pad1: 0.0,
                     };
@@ -1005,174 +1766,190 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.lut_3d_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
 
                     retained_buffers.push(lut_3d_buf);
                 }
 
-                EditOp::Details(p) => {
-                    // Two-pass separable bilateral filter
-                    // Pass 1: Horizontal into tex_temp
-                    let u_pass1 = DetailsUniforms {
-                        structure: p.structure,
-                        sharpening: p.sharpening,
-                        opacity,
-                        pass_idx: 0,
-                        width: width as f32,
-                        height: height as f32,
-                        _pad0: 0.0,
-                        _pad1: 0.0,
-                    };
-                    let details_buf_pass1 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_details_buf_pass1"),
-                        contents: bytemuck::bytes_of(&u_pass1),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("details_bg_pass1"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
-                            wgpu::BindGroupEntry { binding: 2, resource: details_buf_pass1.as_entire_binding() },
-                        ],
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("details_cpass1"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(&self.details_pipeline);
-                        cpass.set_bind_group(0, &bg1, &[]);
-                        cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-                    }
-
-                    // Pass 2: Vertical from tex_temp into dst_view
-                    let u_pass2 = DetailsUniforms {
-                        structure: p.structure,
-                        sharpening: p.sharpening,
-                        opacity,
-                        pass_idx: 1,
-                        width: width as f32,
-                        height: height as f32,
-                        _pad0: 0.0,
-                        _pad1: 0.0,
-                    };
-                    let details_buf_pass2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_details_buf_pass2"),
-                        contents: bytemuck::bytes_of(&u_pass2),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-
-                    let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("details_bg_pass2"),
-                        layout: &self.compute_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: details_buf_pass2.as_entire_binding() },
-                        ],
-                    });
-
-                    {
-                        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("details_cpass2"),
-                            timestamp_writes: None,
-                        });
-                        cpass.set_pipeline(&self.details_pipeline);
-                        cpass.set_bind_group(0, &bg2, &[]);
-                        cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-                    }
-
-                    retained_buffers.push(details_buf_pass1);
-                    retained_buffers.push(details_buf_pass2);
-                }
-
-                EditOp::BlackAndWhite(p) => {
-                    let uniforms = BlackAndWhiteUniforms {
-                        channel_weights: p.color_filter.channel_weights(),
-                        brightness: p.brightness,
-                        contrast: p.contrast,
-                        grain: p.grain,
-                        opacity,
-                        _pad: 0.0,
-                    };
-                    let black_and_white_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_black_and_white_buf"),
+                EditOp::Brush(p) => {
+                    let brush_hash = p.map.content_hash();
+                    let brush_view = &self.brush_cache.get(&brush_hash).unwrap().1;
+                    let uniforms = BrushUniforms::from_params(p, op_opacity);
+                    let brush_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_brush_buf"),
                         contents: bytemuck::bytes_of(&uniforms),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("black_and_white_bg"),
-                        layout: &self.compute_bgl,
+                        label: Some("brush_bg"),
+                        layout: &self.brush_bgl,
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: black_and_white_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(brush_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: brush_buf.as_entire_binding() },
                         ],
                     });
 
                     let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("black_and_white_cpass"),
+                        label: Some("brush_cpass"),
                         timestamp_writes: None,
                     });
-                    cpass.set_pipeline(&self.black_and_white_pipeline);
+                    cpass.set_pipeline(&self.brush_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
 
-                    retained_buffers.push(black_and_white_buf);
+                    retained_buffers.push(brush_buf);
                 }
 
-                EditOp::Vignette(p) => {
-                    let uniforms = VignetteUniforms {
-                        center: p.center,
-                        inner_radius: p.inner_radius,
-                        outer_radius: p.outer_radius,
-                        outer_brightness: p.outer_brightness,
-                        inner_brightness: p.inner_brightness,
-                        aspect: width as f32 / height as f32,
-                        opacity,
+                EditOp::DoubleExposure(p) => {
+                    let (has_sec, sec_view) = if let Some(path) = &p.secondary_path {
+                        if let Some((_, _, view, _)) = self.secondary_images.get(path) {
+                            (true, view)
+                        } else {
+                            (false, &self.fallback_black_view)
+                        }
+                    } else {
+                        (false, &self.fallback_black_view)
                     };
-                    let vignette_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("gpu_vignette_buf"),
+
+                    let uniforms = DoubleExposureUniforms::from_params(p, has_sec, op_opacity);
+                    let de_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_double_exposure_buf"),
                         contents: bytemuck::bytes_of(&uniforms),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("vignette_bg"),
-                        layout: &self.compute_bgl,
+                        label: Some("double_exposure_bg"),
+                        layout: &self.curves_bgl,
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: vignette_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sec_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.linear_clamp_sampler) },
+                            wgpu::BindGroupEntry { binding: 4, resource: de_buf.as_entire_binding() },
                         ],
                     });
 
                     let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("vignette_cpass"),
+                        label: Some("double_exposure_cpass"),
                         timestamp_writes: None,
                     });
-                    cpass.set_pipeline(&self.vignette_pipeline);
+                    cpass.set_pipeline(&self.double_exposure_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
 
-                    retained_buffers.push(vignette_buf);
+                    retained_buffers.push(de_buf);
+                }
+
+                EditOp::TextOverlay(p) => {
+                    let aspect = width as f32 / (height.max(1) as f32);
+                    let text_hash = crate::text_raster::compute_text_cache_key(p) ^ (aspect.to_bits() as u64);
+                    let text_view = &self.text_cache.get(&text_hash).unwrap().1;
+                    let uniforms = TextOverlayUniforms::from_params(p, op_opacity);
+                    let text_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_text_overlay_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("text_overlay_bg"),
+                        layout: &self.curves_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(text_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.linear_clamp_sampler) },
+                            wgpu::BindGroupEntry { binding: 4, resource: text_buf.as_entire_binding() },
+                        ],
+                    });
+
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("text_overlay_cpass"),
+                        timestamp_writes: None,
+                    });
+                    cpass.set_pipeline(&self.text_overlay_pipeline);
+                    cpass.set_bind_group(0, &bg, &[]);
+                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                    drop(cpass);
+
+                    retained_buffers.push(text_buf);
                 }
 
                 EditOp::CropRotate(_) => {
-                    // CropRotate is handled in viewport render quad or full-res export, not here!
+                    // Handled in viewport quad or full-res export, skipped here
                     continue;
                 }
             }
 
-            if first_pass {
+            if has_custom_mask {
+                let mask = node.mask.as_ref().unwrap();
+                let mask_hash = mask.content_hash();
+                let mask_view = &self.mask_cache.get(&mask_hash).unwrap().1;
+
+                let mask_uniforms = MaskBlendUniforms::from_params(opacity, true);
+                let mask_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("gpu_mask_blend_buf"),
+                    contents: bytemuck::bytes_of(&mask_uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+                let mask_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mask_blend_bg"),
+                    layout: &self.mask_blend_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(self.view_pre.as_ref().unwrap()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(post_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(other_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(mask_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_clamp_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: mask_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("mask_blend_cpass"),
+                        timestamp_writes: None,
+                    });
+                    cpass.set_pipeline(&self.mask_blend_pipeline);
+                    cpass.set_bind_group(0, &mask_bg, &[]);
+                    cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+                }
+
+                retained_buffers.push(mask_buf);
                 first_pass = false;
-                in_a = true;
+                in_a = is_other_view_a;
             } else {
-                in_a = !in_a;
+                if first_pass {
+                    first_pass = false;
+                    in_a = true;
+                } else {
+                    in_a = !in_a;
+                }
             }
         }
 

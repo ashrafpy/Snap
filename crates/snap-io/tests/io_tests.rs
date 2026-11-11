@@ -1,12 +1,14 @@
 use half::f16;
 use snap_core::config::{ExportFormat, ExportOptions, ResizeLongEdge};
 use snap_core::image_types::{ImageMetadata, LinearImage, LutColorSpace};
+use snap_core::looks::LookPreset;
 use snap_core::ops::{CropRotateParams, EditOp, TuneParams};
 use snap_core::stack::EditStack;
 use snap_io::{
-    built_in_luts, export_linear_image, install_lut_file, is_raw_path, is_supported_image_path,
-    is_supported_lut_path, load_image, load_lut_from_path, load_sidecar, parse_3dl_lut,
-    parse_cube_lut, parse_hald_png_lut, save_sidecar, sidecar_path_for,
+    built_in_luts, export_linear_image, import_xmp_preset, install_lut_file, install_xmp_preset_to,
+    is_raw_path, is_supported_image_path, is_supported_lut_path, is_xmp_path, load_image,
+    load_lut_from_path, load_sidecar, parse_3dl_lut, parse_cube_lut, parse_hald_png_lut,
+    parse_xmp_str, save_sidecar, sidecar_path_for,
 };
 use std::fs;
 use std::io::Write;
@@ -549,4 +551,327 @@ fn test_lut_error_handling() {
     )
     .unwrap();
     assert!(parse_hald_png_lut("err4", "err4", &bytes).is_err());
+}
+
+#[test]
+fn test_is_xmp_path() {
+    assert!(is_xmp_path(Path::new("film_preset.xmp")));
+    assert!(is_xmp_path(Path::new("FILM_PRESET.XMP")));
+    assert!(is_xmp_path(Path::new("my_looks/warm.Xmp")));
+    assert!(!is_xmp_path(Path::new("grade.cube")));
+    assert!(!is_xmp_path(Path::new("photo.jpg")));
+    assert!(!is_xmp_path(Path::new("photo.png")));
+    assert!(!is_xmp_path(Path::new("xmp")));
+    assert!(!is_xmp_path(Path::new("")));
+}
+
+#[test]
+fn test_xmp_sample_presets() {
+    let cinema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/sample_presets/cinema_kodak.xmp");
+    assert!(cinema_path.is_file(), "cinema_kodak.xmp must exist");
+    let cinema = import_xmp_preset(&cinema_path).expect("parse cinema_kodak.xmp");
+    assert_eq!(cinema.name, "Cinema Kodak");
+    assert_eq!(cinema.id, "cinema_kodak");
+    assert!(!cinema.stack.nodes.is_empty());
+
+    let mut has_raw = false;
+    let mut has_tune = false;
+    let mut has_curves = false;
+    let mut has_hsl = false;
+    let mut has_details = false;
+    let mut has_vignette = false;
+
+    for node in &cinema.stack.nodes {
+        match &node.op {
+            EditOp::RawDevelop(raw) => {
+                has_raw = true;
+                assert!((raw.exposure_ev - 0.35).abs() < 1e-3);
+            }
+            EditOp::TuneImage(tune) => {
+                has_tune = true;
+                assert!((tune.contrast - 15.0).abs() < 1e-3);
+                assert!((tune.highlights - (-25.0)).abs() < 1e-3);
+                assert!((tune.shadows - 20.0).abs() < 1e-3);
+            }
+            EditOp::Curves(curves) => {
+                has_curves = true;
+                assert!(!curves.rgb.is_identity());
+            }
+            EditOp::ColorHsl(hsl) => {
+                has_hsl = true;
+                // Orange band (index 1) saturation
+                assert!(hsl.bands[1].saturation > 0.0);
+                // Cyan/Aqua band (index 4) saturation
+                assert!(hsl.bands[4].saturation < 0.0);
+            }
+            EditOp::Details(det) => {
+                has_details = true;
+                assert!(det.structure > 0.0);
+            }
+            EditOp::Vignette(vig) => {
+                has_vignette = true;
+                assert!((vig.outer_brightness - (-18.0)).abs() < 1e-3);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(has_raw, "Cinema Kodak should have RawDevelop for exposure");
+    assert!(has_tune, "Cinema Kodak should have TuneImage");
+    assert!(has_curves, "Cinema Kodak should have Curves");
+    assert!(has_hsl, "Cinema Kodak should have ColorHsl");
+    assert!(has_details, "Cinema Kodak should have Details");
+    assert!(has_vignette, "Cinema Kodak should have Vignette");
+
+    // Test Nordic Clean
+    let nordic_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/sample_presets/nordic_clean.xmp");
+    assert!(nordic_path.is_file(), "nordic_clean.xmp must exist");
+    let nordic = import_xmp_preset(&nordic_path).expect("parse nordic_clean.xmp");
+    assert_eq!(nordic.name, "Nordic Clean");
+    assert_eq!(nordic.id, "nordic_clean");
+    assert!(!nordic.stack.nodes.is_empty());
+
+    let mut nordic_has_raw = false;
+    let mut nordic_has_tune = false;
+    let mut nordic_has_curves = false;
+    let mut nordic_has_hsl = false;
+
+    for node in &nordic.stack.nodes {
+        match &node.op {
+            EditOp::RawDevelop(raw) => {
+                nordic_has_raw = true;
+                // Kelvin 4750K is cooler than 5500K neutral -> temperature < 0
+                assert!(raw.temperature < 0.0);
+                assert!((raw.tint - (-4.0)).abs() < 1e-3);
+            }
+            EditOp::TuneImage(tune) => {
+                nordic_has_tune = true;
+                assert!((tune.contrast - (-8.0)).abs() < 1e-3);
+                assert!((tune.shadows - 32.0).abs() < 1e-3);
+                assert!((tune.highlights - (-18.0)).abs() < 1e-3);
+            }
+            EditOp::Curves(curves) => {
+                nordic_has_curves = true;
+                assert!(!curves.rgb.is_identity());
+            }
+            EditOp::ColorHsl(hsl) => {
+                nordic_has_hsl = true;
+                // Yellow (index 2) and Green (index 3) should be desaturated
+                assert!(hsl.bands[2].saturation <= -20.0);
+                assert!(hsl.bands[3].saturation <= -35.0);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(nordic_has_raw, "Nordic Clean should have RawDevelop with cool WB");
+    assert!(nordic_has_tune, "Nordic Clean should have TuneImage");
+    assert!(nordic_has_curves, "Nordic Clean should have Curves");
+    assert!(nordic_has_hsl, "Nordic Clean should have ColorHsl");
+}
+
+#[test]
+fn test_xmp_attribute_vs_element_syntax() {
+    let attr_xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Exposure2012="+0.50"
+    crs:Contrast2012="+20"
+    crs:Highlights2012="-15"
+    crs:Shadows2012="+25"
+    crs:Clarity2012="+14"
+    crs:Texture="+6"
+    crs:PostCropVignetteAmount="-25"
+    crs:PostCropVignetteMidpoint="50">
+   <crs:Name>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">Dual Syntax</rdf:li>
+    </rdf:Alt>
+   </crs:Name>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+
+    let elem_xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">
+   <crs:Name>Dual Syntax</crs:Name>
+   <crs:Exposure2012>+0.50</crs:Exposure2012>
+   <crs:Contrast2012>+20</crs:Contrast2012>
+   <crs:Highlights2012>-15</crs:Highlights2012>
+   <crs:Shadows2012>+25</crs:Shadows2012>
+   <crs:Clarity2012>+14</crs:Clarity2012>
+   <crs:Texture>+6</crs:Texture>
+   <crs:PostCropVignetteAmount>-25</crs:PostCropVignetteAmount>
+   <crs:PostCropVignetteMidpoint>50</crs:PostCropVignetteMidpoint>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+
+    let preset_attr = parse_xmp_str(attr_xml, "fallback").expect("parse attr xml");
+    let preset_elem = parse_xmp_str(elem_xml, "fallback").expect("parse elem xml");
+
+    assert_eq!(preset_attr.name, preset_elem.name);
+    assert_eq!(preset_attr.id, preset_elem.id);
+    assert_eq!(preset_attr.stack.nodes.len(), preset_elem.stack.nodes.len());
+
+    for (node_a, node_b) in preset_attr.stack.nodes.iter().zip(preset_elem.stack.nodes.iter()) {
+        assert_eq!(node_a.op, node_b.op);
+    }
+}
+
+#[test]
+fn test_xmp_grayscale_vignette_hsl_curves() {
+    let xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:ConvertToGrayscale="True"
+    crs:GrainAmount="35"
+    crs:PostCropVignetteAmount="-40"
+    crs:PostCropVignetteMidpoint="65"
+    crs:HueAdjustmentRed="5"
+    crs:SaturationAdjustmentRed="10"
+    crs:LuminanceAdjustmentRed="15"
+    crs:HueAdjustmentAqua="25"
+    crs:SaturationAdjustmentAqua="-35"
+    crs:LuminanceAdjustmentAqua="-5"
+    crs:HueAdjustmentBlue="10"
+    crs:SaturationAdjustmentBlue="-20"
+    crs:LuminanceAdjustmentBlue="-10">
+   <crs:Name>
+    <rdf:Alt>
+     <rdf:li>Creative Monochrome</rdf:li>
+    </rdf:Alt>
+   </crs:Name>
+   <crs:ToneCurvePV2012>
+    <rdf:Seq>
+     <rdf:li>0, 15</rdf:li>
+     <rdf:li>128, 120</rdf:li>
+     <rdf:li>255, 245</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012>
+   <crs:ToneCurvePV2012Red>
+    <rdf:Seq>
+     <rdf:li>0, 5</rdf:li>
+     <rdf:li>255, 250</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Red>
+   <crs:ToneCurvePV2012Green>
+    <rdf:Seq>
+     <rdf:li>0, 0</rdf:li>
+     <rdf:li>128, 135</rdf:li>
+     <rdf:li>255, 255</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Green>
+   <crs:ToneCurvePV2012Blue>
+    <rdf:Seq>
+     <rdf:li>0, 20</rdf:li>
+     <rdf:li>255, 240</rdf:li>
+    </rdf:Seq>
+   </crs:ToneCurvePV2012Blue>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+
+    let preset = parse_xmp_str(xml, "mono").expect("parse mono xml");
+    assert_eq!(preset.name, "Creative Monochrome");
+    assert_eq!(preset.id, "creative_monochrome");
+
+    let mut found_bw = false;
+    let mut found_vig = false;
+    let mut found_hsl = false;
+    let mut found_curves = false;
+
+    for node in &preset.stack.nodes {
+        match &node.op {
+            EditOp::BlackAndWhite(bw) => {
+                found_bw = true;
+                assert!((bw.grain - 35.0).abs() < 1e-3);
+            }
+            EditOp::Vignette(vig) => {
+                found_vig = true;
+                assert!((vig.outer_brightness - (-40.0)).abs() < 1e-3);
+            }
+            EditOp::ColorHsl(hsl) => {
+                found_hsl = true;
+                // Red is index 0
+                assert!((hsl.bands[0].hue - 5.0).abs() < 1e-3);
+                assert!((hsl.bands[0].saturation - 10.0).abs() < 1e-3);
+                assert!((hsl.bands[0].luminance - 15.0).abs() < 1e-3);
+                // Aqua maps to Cyan (index 4)
+                assert!((hsl.bands[4].hue - 25.0).abs() < 1e-3);
+                assert!((hsl.bands[4].saturation - (-35.0)).abs() < 1e-3);
+                assert!((hsl.bands[4].luminance - (-5.0)).abs() < 1e-3);
+            }
+            EditOp::Curves(curves) => {
+                found_curves = true;
+                assert!(!curves.rgb.is_identity());
+                assert!(!curves.red.is_identity());
+                assert!(!curves.green.is_identity());
+                assert!(!curves.blue.is_identity());
+            }
+            _ => {}
+        }
+    }
+
+    assert!(found_bw, "Should find BlackAndWhite");
+    assert!(found_vig, "Should find Vignette");
+    assert!(found_hsl, "Should find ColorHsl");
+    assert!(found_curves, "Should find Curves");
+}
+
+#[test]
+fn test_xmp_install_to() {
+    let tmp = TempTestDir::new("xmp_install");
+    let cinema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/sample_presets/cinema_kodak.xmp");
+
+    let installed = install_xmp_preset_to(&cinema_path, &tmp.path).expect("install xmp");
+    assert_eq!(installed.id, "cinema_kodak");
+
+    let expected_file = tmp.path.join("cinema_kodak.json");
+    assert!(expected_file.is_file(), "installed json file must exist");
+
+    let content = fs::read_to_string(&expected_file).expect("read installed json");
+    let loaded: LookPreset = serde_json::from_str(&content).expect("deserialize LookPreset");
+    assert_eq!(loaded.id, installed.id);
+    assert_eq!(loaded.name, installed.name);
+    assert_eq!(loaded.stack.nodes.len(), installed.stack.nodes.len());
+}
+
+#[test]
+fn test_xmp_invalid_inputs() {
+    // 1. Plain text without XML
+    let res1 = parse_xmp_str("hello world", "test");
+    assert!(matches!(res1, Err(snap_io::IoError::XmpParse(_))));
+
+    // 2. Non-XMP XML
+    let res2 = parse_xmp_str("<xml><test>123</test></xml>", "test");
+    assert!(matches!(res2, Err(snap_io::IoError::XmpParse(_))));
+
+    // 3. Missing crs namespace
+    let res3 = parse_xmp_str(
+        "<x:xmpmeta><rdf:RDF><rdf:Description/></rdf:RDF></x:xmpmeta>",
+        "test",
+    );
+    assert!(matches!(res3, Err(snap_io::IoError::XmpParse(_))));
+
+    // 4. Malformed XML (unclosed tag)
+    let res4 = parse_xmp_str(
+        "<x:xmpmeta><rdf:RDF xmlns:crs=\"http://ns.adobe.com\"><crs:Exposure2012>",
+        "test",
+    );
+    assert!(matches!(res4, Err(snap_io::IoError::XmpParse(_))));
+
+    // 5. Non-existent file
+    let res5 = import_xmp_preset(Path::new("non_existent_preset.xmp"));
+    assert!(matches!(res5, Err(snap_io::IoError::Io(_))));
+
+    // 6. Non-XMP extension
+    let res6 = import_xmp_preset(Path::new("photo.jpg"));
+    assert!(matches!(res6, Err(snap_io::IoError::UnsupportedFormat(_))));
 }

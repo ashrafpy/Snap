@@ -10,6 +10,7 @@ pub struct HeadlessGpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub engine: GpuPipelineEngine,
+    pub next_image_id: u64,
 }
 
 impl HeadlessGpu {
@@ -42,7 +43,13 @@ impl HeadlessGpu {
             device,
             queue,
             engine,
+            next_image_id: 0,
         })
+    }
+
+    /// Upload a secondary image for Double Exposure operations.
+    pub fn upload_secondary_image(&mut self, path_key: &str, image: &LinearImage) {
+        self.engine.upload_secondary_image(&self.device, &self.queue, path_key, image);
     }
 
     /// Read back an `Rgba16Float` texture from the GPU into a `LinearImage`.
@@ -139,7 +146,8 @@ impl HeadlessGpu {
         }
 
         // 2. Upload source image
-        let image_id = 1u64;
+        self.next_image_id = self.next_image_id.wrapping_add(1);
+        let image_id = self.next_image_id;
         self.engine.upload_source_image(&self.device, &self.queue, image_id, source);
 
         // 3. Process compute stack

@@ -32,6 +32,9 @@ pub enum IoError {
     #[error("LUT parse error: {0}")]
     LutParse(String),
 
+    #[error("XMP parse error: {0}")]
+    XmpParse(String),
+
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
 

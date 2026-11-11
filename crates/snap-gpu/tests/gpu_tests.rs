@@ -2,11 +2,13 @@ use std::sync::Arc;
 use half::f16;
 use snap_core::curves::CurvesParams;
 use snap_core::image_types::{ImageMetadata, LinearImage, Lut3D, LutColorSpace};
+use snap_core::mask::LayerMask;
 use snap_core::ops::{
     ColorHslParams, CropRotateParams, DetailsParams, EditOp, Lut3dParams, TuneParams,
     WhiteBalanceParams,
 };
-use snap_core::stack::EditStack;
+use snap_core::ops_ext::*;
+use snap_core::stack::{EditNode, EditStack};
 use snap_gpu::{HeadlessGpu, ViewportParams};
 
 fn create_synthetic_colorchecker(w: u32, h: u32) -> LinearImage {
@@ -667,4 +669,450 @@ fn test_hdr_color_hsl_no_negative_saturation() {
     assert!(p0_r > 2.0, "HDR red channel distorted: {}", p0_r);
     assert!(p0_g > 0.8, "HDR green channel distorted: {}", p0_g);
     assert!(p0_b > 0.6, "HDR blue channel distorted: {}", p0_b);
+}
+
+fn assert_finite_and_transformed(out: &LinearImage, src: &LinearImage, op_name: &str) {
+    assert_eq!(out.width, src.width);
+    assert_eq!(out.height, src.height);
+    let mut max_delta = 0.0f32;
+    for i in 0..out.pixels.len() {
+        for c in 0..4 {
+            let val = out.pixels[i][c].to_f32();
+            assert!(!val.is_nan(), "{}: pixel {} channel {} is NaN", op_name, i, c);
+            assert!(val.is_finite(), "{}: pixel {} channel {} is infinite", op_name, i, c);
+            if c < 3 {
+                let delta = (val - src.pixels[i][c].to_f32()).abs();
+                if delta > max_delta {
+                    max_delta = delta;
+                }
+            } else {
+                // Alpha must remain 1.0
+                assert!((val - 1.0).abs() < 1e-2, "{}: pixel {} alpha is {} (expected 1.0)", op_name, i, val);
+            }
+        }
+    }
+    assert!(
+        max_delta > 0.005,
+        "{}: max delta {:.6} is too small (op produced no visible transformation)",
+        op_name,
+        max_delta
+    );
+}
+
+#[test]
+fn test_all_25_phase2_4_tools() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let src = create_synthetic_colorchecker(64, 48);
+
+    // Upload secondary image for DoubleExposure
+    let sec_pixels = vec![[f16::from_f32(0.1), f16::from_f32(0.8), f16::from_f32(0.2), f16::from_f32(1.0)]; 64 * 48];
+    let sec_img = LinearImage::new(64, 48, sec_pixels, ImageMetadata::default()).unwrap();
+    gpu.upload_secondary_image("sec_test", &sec_img);
+
+    let mut brush_map = snap_core::mask::BrushMap::new();
+    brush_map.paint_dab(0.5, 0.5, 0.25, 0.5, 0.8, false);
+
+    let tools: Vec<(&str, EditOp)> = vec![
+        ("ColorGrade", EditOp::ColorGrade({
+            let mut p = ColorGradeParams::default();
+            p.shadows.saturation = 40.0;
+            p.shadows.hue_deg = 220.0;
+            p.balance = 10.0;
+            p
+        })),
+        ("Dehaze", EditOp::Dehaze({
+            let mut p = DehazeParams::default();
+            p.strength = 50.0;
+            p
+        })),
+        ("TonalContrast", EditOp::TonalContrast({
+            let mut p = TonalContrastParams::default();
+            p.high_tones = 30.0;
+            p.mid_tones = 20.0;
+            p
+        })),
+        ("Perspective", EditOp::Perspective({
+            let mut p = PerspectiveParams::default();
+            p.vertical = 25.0;
+            p.horizontal = 15.0;
+            p
+        })),
+        ("Expand", EditOp::Expand({
+            let mut p = ExpandParams::default();
+            p.top = 0.15;
+            p.bottom = 0.15;
+            p.fill_mode = ExpandFillMode::White;
+            p
+        })),
+        ("Selective", EditOp::Selective({
+            let mut p = SelectiveParams::default();
+            let mut pin = SelectivePin::default();
+            pin.brightness = 40.0;
+            pin.radius = 0.5;
+            p.pins = vec![pin];
+            p
+        })),
+        ("Brush", EditOp::Brush({
+            let mut p = BrushParams::default();
+            p.channel = BrushChannel::DodgeBurn;
+            p.map = brush_map;
+            p
+        })),
+        ("Healing", EditOp::Healing({
+            let mut p = HealingParams::default();
+            p.strokes.push(HealStroke {
+                points: vec![[0.5, 0.5]],
+                radius: 0.15,
+                source_offset: Some([0.1, 0.1]),
+            });
+            p
+        })),
+        ("Halation", EditOp::Halation({
+            let mut p = HalationParams::default();
+            p.threshold = 0.1;
+            p.strength = 80.0;
+            p.spread = 40.0;
+            p
+        })),
+        ("Bloom", EditOp::Bloom({
+            let mut p = BloomParams::default();
+            p.strength = 60.0;
+            p.size = 50.0;
+            p.highlight_range = 30.0;
+            p
+        })),
+        ("GrainyFilm", EditOp::GrainyFilm({
+            let mut p = GrainyFilmParams::default();
+            p.stock = FilmStock::Velvia50;
+            p.grain = 40.0;
+            p.style_strength = 60.0;
+            p
+        })),
+        ("Noir", EditOp::Noir({
+            let mut p = NoirParams::default();
+            p.preset = NoirPreset::Film;
+            p.wash = 30.0;
+            p
+        })),
+        ("HdrScape", EditOp::HdrScape({
+            let mut p = HdrScapeParams::default();
+            p.filter_strength = 50.0;
+            p.brightness = 15.0;
+            p
+        })),
+        ("GlamourGlow", EditOp::GlamourGlow({
+            let mut p = GlamourGlowParams::default();
+            p.glow = 60.0;
+            p.saturation = 20.0;
+            p
+        })),
+        ("Drama", EditOp::Drama({
+            let mut p = DramaParams::default();
+            p.preset = DramaPreset::Drama1;
+            p.filter_strength = 60.0;
+            p
+        })),
+        ("Vintage", EditOp::Vintage({
+            let mut p = VintageParams::default();
+            p.style = 3;
+            p.style_strength = 60.0;
+            p
+        })),
+        ("LensBlur", EditOp::LensBlur({
+            let mut p = LensBlurParams::default();
+            p.blur_strength = 60.0;
+            p.bokeh_boost = 50.0;
+            p
+        })),
+        ("MotionBlur", EditOp::MotionBlur({
+            let mut p = MotionBlurParams::default();
+            p.strength = 40.0;
+            p.angle_deg = 45.0;
+            p
+        })),
+        ("DoubleExposure", EditOp::DoubleExposure({
+            let mut p = DoubleExposureParams::default();
+            p.secondary_path = Some("sec_test".into());
+            p.blend_mode = DoubleExposureBlend::Blend;
+            p.opacity = 60.0;
+            p
+        })),
+        ("Retrolux", EditOp::Retrolux({
+            let mut p = RetroluxParams::default();
+            p.style = 2;
+            p.style_strength = 60.0;
+            p.light_leaks = 40.0;
+            p
+        })),
+        ("Grunge", EditOp::Grunge({
+            let mut p = GrungeParams::default();
+            p.style = 1;
+            p.texture_strength = 50.0;
+            p
+        })),
+        ("Portrait", EditOp::Portrait({
+            let mut p = PortraitParams::default();
+            p.skin_smoothing = 50.0;
+            p.eye_clarity = 40.0;
+            p
+        })),
+        ("HeadPose", EditOp::HeadPose({
+            let mut p = HeadPoseParams::default();
+            p.yaw_x = 30.0;
+            p.pitch_y = 20.0;
+            p.smile = 30.0;
+            p
+        })),
+        ("Frames", EditOp::Frames({
+            let mut p = FramesParams::default();
+            p.width = 15.0;
+            p
+        })),
+        ("TextOverlayNormal", EditOp::TextOverlay({
+            let mut p = TextOverlayParams::default();
+            p.text = "SNAP".to_string();
+            p.opacity = 100.0;
+            p.scale = 0.5;
+            p.invert_mask = false;
+            p
+        })),
+        ("TextOverlayKnockout", EditOp::TextOverlay({
+            let mut p = TextOverlayParams::default();
+            p.text = "SNAP".to_string();
+            p.opacity = 100.0;
+            p.scale = 0.5;
+            p.invert_mask = true;
+            p
+        })),
+    ];
+
+    for (name, op) in tools {
+        let mut stack = EditStack::default();
+        stack.push_op(op);
+        let out = gpu
+            .export_full_res(&src, &stack, &[])
+            .unwrap_or_else(|e| panic!("Export failed for {}: {:?}", name, e));
+
+        assert_finite_and_transformed(&out, &src, name);
+    }
+}
+
+#[test]
+fn test_2pass_separable_isolation() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let src = create_synthetic_colorchecker(32, 32);
+
+    let ops: Vec<(&str, EditOp)> = vec![
+        ("Halation", EditOp::Halation(HalationParams { threshold: 0.1, strength: 80.0, spread: 40.0 })),
+        ("Bloom", EditOp::Bloom(BloomParams { strength: 60.0, size: 50.0, highlight_range: 30.0 })),
+        ("TonalContrast", EditOp::TonalContrast(TonalContrastParams { high_tones: 30.0, mid_tones: 20.0, low_tones: 10.0, protect_shadows: 10.0, protect_highlights: 10.0 })),
+        ("HdrScape", EditOp::HdrScape(HdrScapeParams { filter_strength: 50.0, brightness: 15.0, ..Default::default() })),
+        ("GlamourGlow", EditOp::GlamourGlow(GlamourGlowParams { glow: 60.0, saturation: 20.0, ..Default::default() })),
+    ];
+
+    for (name, op) in ops {
+        let mut stack = EditStack::default();
+        stack.push_op(op);
+        let out = gpu.export_full_res(&src, &stack, &[]).unwrap_or_else(|e| panic!("Export failed for {}: {:?}", name, e));
+        for i in 0..out.pixels.len() {
+            let a = out.pixels[i][3].to_f32();
+            assert!((a - 1.0).abs() < 1e-2, "{}: pixel {} alpha is {} (expected 1.0)", name, i, a);
+            for c in 0..3 {
+                let v = out.pixels[i][c].to_f32();
+                assert!(!v.is_nan() && v.is_finite(), "{}: pixel {} channel {} is not finite: {}", name, i, c, v);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_layer_mask_blending_and_half_split() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 64u32;
+    let h = 48u32;
+    let src = create_synthetic_colorchecker(w, h);
+
+    // Create half-split mask: left half (x < 128 in 256x256 coordinate) is 0, right half (x >= 128) is 255
+    let mut mask_bytes = vec![0u8; 256 * 256];
+    for y in 0..256 {
+        for x in 128..256 {
+            mask_bytes[y * 256 + x] = 255;
+        }
+    }
+    let half_mask = LayerMask::from_bytes(mask_bytes).unwrap();
+
+    // 1. Test half-split on 1-pass op (TuneImage brightness boost)
+    {
+        let mut stack = EditStack::default();
+        let mut node = EditNode::new(EditOp::TuneImage(TuneParams {
+            brightness: 50.0,
+            ..Default::default()
+        }));
+        node.mask = Some(half_mask.clone());
+        stack.nodes.push(node);
+
+        let out = gpu.export_full_res(&src, &stack, &[]).expect("Export 1-pass masked op");
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize;
+                let src_px = src.pixels[idx];
+                let out_px = out.pixels[idx];
+                // Left half (x < 24) should be untouched
+                if x < 24 {
+                    for c in 0..3 {
+                        let delta = (out_px[c].to_f32() - src_px[c].to_f32()).abs();
+                        assert!(delta < 2e-3, "Left half pixel ({}, {}) modified: delta={}", x, y, delta);
+                    }
+                }
+                // Right half (x >= 40) should be brightened
+                if x >= 40 {
+                    let out_luma = out_px[0].to_f32() + out_px[1].to_f32() + out_px[2].to_f32();
+                    let src_luma = src_px[0].to_f32() + src_px[1].to_f32() + src_px[2].to_f32();
+                    assert!(out_luma > src_luma + 0.05, "Right half pixel ({}, {}) not brightened", x, y);
+                }
+            }
+        }
+    }
+
+    // 2. Test half-split on 2-pass separable op (Halation)
+    {
+        let mut stack = EditStack::default();
+        let mut node = EditNode::new(EditOp::Halation(HalationParams {
+            threshold: 0.1,
+            strength: 90.0,
+            spread: 50.0,
+        }));
+        node.mask = Some(half_mask.clone());
+        stack.nodes.push(node);
+
+        let out = gpu.export_full_res(&src, &stack, &[]).expect("Export 2-pass masked Halation");
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize;
+                let src_px = src.pixels[idx];
+                let out_px = out.pixels[idx];
+                if x < 24 {
+                    for c in 0..3 {
+                        let delta = (out_px[c].to_f32() - src_px[c].to_f32()).abs();
+                        assert!(delta < 2e-3, "Halation left half pixel ({}, {}) modified: delta={}", x, y, delta);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Test 0% uniform mask leaves entire image untouched
+    {
+        let mut stack = EditStack::default();
+        let mut node = EditNode::new(EditOp::TuneImage(TuneParams {
+            brightness: 50.0,
+            ..Default::default()
+        }));
+        node.mask = Some(LayerMask::empty());
+        stack.nodes.push(node);
+
+        let out = gpu.export_full_res(&src, &stack, &[]).expect("Export empty mask");
+        for i in 0..out.pixels.len() {
+            for c in 0..3 {
+                let delta = (out.pixels[i][c].to_f32() - src.pixels[i][c].to_f32()).abs();
+                assert!(delta < 2e-3, "0% mask pixel {} modified: delta={}", i, delta);
+            }
+        }
+    }
+
+    // 4. Test 50% uniform mask blends between pre and post
+    {
+        let half_bytes = vec![128u8; 256 * 256];
+        let mid_mask = LayerMask::from_bytes(half_bytes).unwrap();
+
+        let mut stack_full = EditStack::default();
+        let mut node_full = EditNode::new(EditOp::TuneImage(TuneParams {
+            brightness: 50.0,
+            ..Default::default()
+        }));
+        node_full.mask = Some(LayerMask::full());
+        stack_full.nodes.push(node_full);
+        let out_full = gpu.export_full_res(&src, &stack_full, &[]).expect("Export full mask");
+
+        let mut stack_mid = EditStack::default();
+        let mut node_mid = EditNode::new(EditOp::TuneImage(TuneParams {
+            brightness: 50.0,
+            ..Default::default()
+        }));
+        node_mid.mask = Some(mid_mask);
+        stack_mid.nodes.push(node_mid);
+        let out_mid = gpu.export_full_res(&src, &stack_mid, &[]).expect("Export 50% mask");
+
+        let p_src = src.pixels[0][0].to_f32();
+        let p_full = out_full.pixels[0][0].to_f32();
+        let p_mid = out_mid.pixels[0][0].to_f32();
+        assert!(p_mid > p_src + 0.01 && p_mid < p_full - 0.01, "50% mask value {} not between src {} and full {}", p_mid, p_src, p_full);
+    }
+}
+
+#[test]
+fn test_hdr_highlight_safety_phase2_4() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 16u32;
+    let h = 16u32;
+    // Bright HDR highlight pixel (e.g. sun at 3.2)
+    let pixels = vec![[f16::from_f32(3.2); 4]; (w * h) as usize];
+    let src = LinearImage::new(w, h, pixels, ImageMetadata::default()).unwrap();
+
+    let ops: Vec<(&str, EditOp)> = vec![
+        ("ColorGrade", EditOp::ColorGrade(ColorGradeParams { balance: 10.0, ..Default::default() })),
+        ("Halation", EditOp::Halation(HalationParams { threshold: 0.5, strength: 50.0, spread: 20.0 })),
+        ("Bloom", EditOp::Bloom(BloomParams { strength: 40.0, size: 30.0, highlight_range: 20.0 })),
+        ("GrainyFilm", EditOp::GrainyFilm(GrainyFilmParams { stock: FilmStock::K100, grain: 20.0, style_strength: 30.0 })),
+        ("HdrScape", EditOp::HdrScape(HdrScapeParams { filter_strength: 30.0, brightness: 10.0, ..Default::default() })),
+        ("LensBlur", EditOp::LensBlur(LensBlurParams { blur_strength: 30.0, bokeh_boost: 20.0, ..Default::default() })),
+    ];
+
+    for (name, op) in ops {
+        let mut stack = EditStack::default();
+        stack.push_op(op);
+        let out = gpu.export_full_res(&src, &stack, &[]).unwrap_or_else(|e| panic!("Export HDR failed for {}: {:?}", name, e));
+        for i in 0..out.pixels.len() {
+            for c in 0..3 {
+                let v = out.pixels[i][c].to_f32();
+                assert!(!v.is_nan() && v.is_finite(), "{}: pixel {} channel {} is not finite: {}", name, i, c, v);
+                assert!(v > 1.0, "{}: pixel {} channel {} solarized or crushed to <= 1.0: {}", name, i, c, v);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_batch_multi_image_export_regression() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 32u32;
+    let h = 32u32;
+
+    // Image 1: Red
+    let red_pixels = vec![[f16::from_f32(1.0), f16::from_f32(0.0), f16::from_f32(0.0), f16::from_f32(1.0)]; (w * h) as usize];
+    let img1 = LinearImage::new(w, h, red_pixels, ImageMetadata::default()).unwrap();
+
+    // Image 2: Blue
+    let blue_pixels = vec![[f16::from_f32(0.0), f16::from_f32(0.0), f16::from_f32(1.0), f16::from_f32(1.0)]; (w * h) as usize];
+    let img2 = LinearImage::new(w, h, blue_pixels, ImageMetadata::default()).unwrap();
+
+    let mut stack = EditStack::default();
+    stack.push_op(EditOp::TuneImage(TuneParams {
+        brightness: 10.0,
+        ..Default::default()
+    }));
+
+    // Sequential exports on the SAME HeadlessGpu instance
+    let out1 = gpu.export_full_res(&img1, &stack, &[]).expect("Export img1");
+    let out2 = gpu.export_full_res(&img2, &stack, &[]).expect("Export img2");
+
+    let p1_r = out1.pixels[0][0].to_f32();
+    let p1_b = out1.pixels[0][2].to_f32();
+    assert!(p1_r > 0.8, "Image 1 red channel is crushed: {}", p1_r);
+    assert!(p1_b < 0.2, "Image 1 blue channel contaminated: {}", p1_b);
+
+    let p2_r = out2.pixels[0][0].to_f32();
+    let p2_b = out2.pixels[0][2].to_f32();
+    assert!(p2_b > 0.8, "Image 2 blue channel is crushed (stale cache from Image 1?): {}", p2_b);
+    assert!(p2_r < 0.2, "Image 2 red channel contaminated (stale cache from Image 1?): {}", p2_r);
 }

@@ -5,11 +5,18 @@ use iced_graphics::Viewport;
 use iced_runtime::user_interface::Cache;
 use iced_runtime::UserInterface;
 use snap_core::curves::CurvePreset;
-use snap_core::ops::ToolId;
+use snap_core::mask::SmartMaskKind;
+use snap_core::ops::{EditOp, ToolId};
+use snap_core::ops_ext::{
+    ColorGradeParams, ColorWheelValue, ColorWheelZone, FilmStock, FrameStyle, FramesParams,
+    GrainyFilmParams, LensBlurParams, LensBlurShape, SelectiveParams, SelectivePin,
+    TextColorPreset, TextOverlayParams, TextStyle,
+};
 
 use crate::app::{Message, SnapApp, Tab};
 use crate::curves_widget::CurvesEvent;
 use crate::theme;
+use crate::tool_editors_ext::ToolEditorEvent;
 use crate::views;
 
 /// Offscreen Vulkan/WGPU rendering harness for pixel-perfect UI preview captures.
@@ -150,13 +157,13 @@ impl OffscreenStudio {
     }
 }
 
-/// Captures all 7 high-fidelity UI preview scenarios to PNG at 1440x900 resolution.
+/// Captures all 12 high-fidelity UI preview scenarios to PNG at 1440x900 resolution.
 pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
 
     let mut studio = OffscreenStudio::new(1440, 900)?;
 
-    println!("Capturing UI preview 1/7: Welcome Studio...");
+    println!("Capturing UI preview 1/12: Welcome Studio...");
     // 1. preview_01_welcome.png
     let (mut app, _) = SnapApp::boot(None);
     app.config.recent_files = vec![
@@ -165,14 +172,14 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     ];
     studio.render_scenario_to_png(app, &out_dir.join("preview_01_welcome.png"))?;
 
-    println!("Capturing UI preview 2/7: Tools Grid...");
-    // 2. preview_02_tools_grid.png
+    println!("Capturing UI preview 2/12: Tools Grid...");
+    // 2. preview_02_tools_grid.png (Categorized 35-Tool Studio Grid)
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
     app.current_tab = Tab::Tools;
     studio.render_scenario_to_png(app, &out_dir.join("preview_02_tools_grid.png"))?;
 
-    println!("Capturing UI preview 3/7: Tune Image HUD...");
+    println!("Capturing UI preview 3/12: Tune Image HUD...");
     // 3. preview_03_tune_hud.png
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
@@ -182,7 +189,7 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     let _ = app.update(Message::SetVerticalPickerActive(true));
     studio.render_scenario_to_png(app, &out_dir.join("preview_03_tune_hud.png"))?;
 
-    println!("Capturing UI preview 4/7: Curves...");
+    println!("Capturing UI preview 4/12: Curves...");
     // 4. preview_04_curves.png
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
@@ -190,7 +197,7 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     let _ = app.update(Message::CurvesWidgetEvent(CurvesEvent::ApplyPreset(CurvePreset::Punch)));
     studio.render_scenario_to_png(app, &out_dir.join("preview_04_curves.png"))?;
 
-    println!("Capturing UI preview 5/7: 3D LUT...");
+    println!("Capturing UI preview 5/12: 3D LUT...");
     // 5. preview_05_hsl_lut.png
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
@@ -200,7 +207,7 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     let _ = app.update(Message::SetLutStrength(85.0));
     studio.render_scenario_to_png(app, &out_dir.join("preview_05_hsl_lut.png"))?;
 
-    println!("Capturing UI preview 6/7: Looks...");
+    println!("Capturing UI preview 6/12: Looks...");
     // 6. preview_06_looks.png
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
@@ -208,8 +215,8 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     app.current_tab = Tab::Looks;
     studio.render_scenario_to_png(app, &out_dir.join("preview_06_looks.png"))?;
 
-    println!("Capturing UI preview 7/7: View Edits Stack...");
-    // 7. preview_07_view_edits.png
+    println!("Capturing UI preview 7/12: View Edits Stack (Layer Mask + Smart Mask)...");
+    // 7. preview_07_view_edits.png (Expanded Layer Mask + 7 Smart Mask inspector & ruby-red mask overlay)
     let (mut app, _) = SnapApp::boot(None);
     let _ = app.update(Message::LoadDemoScene);
     let _ = app.update(Message::OpenTool(ToolId::TuneImage));
@@ -218,13 +225,119 @@ pub fn capture_all_previews(out_dir: &Path) -> Result<()> {
     let _ = app.update(Message::OpenTool(ToolId::Details));
     let _ = app.update(Message::SetSliderParamLive(0, 25.0));
     let _ = app.update(Message::ApplyActiveTool);
-    let _ = app.update(Message::OpenTool(ToolId::Lut3d));
-    let first_lut_id = app.lut_library.first().map(|l| l.id.clone()).unwrap_or_default();
-    let _ = app.update(Message::SelectLut(first_lut_id));
+    let _ = app.update(Message::OpenTool(ToolId::ColorGrade));
+    let mut grade_op = ColorGradeParams::default();
+    grade_op.shadows.saturation = 35.0;
+    grade_op.shadows.hue_deg = 200.0;
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::ColorGrade(grade_op))));
     let _ = app.update(Message::ApplyActiveTool);
+
+    // Expand mask on node 1 (Details) and apply Sky smart mask with ruby-red overlay
+    if let Some(node) = app.document_history.current().nodes.get(1) {
+        let node_id = node.id;
+        let _ = app.update(Message::ToggleNodeMaskPanel(node_id));
+        let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::MaskApplySmart {
+            node_id,
+            kind: SmartMaskKind::Sky,
+        }));
+        let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::MaskToggleRedOverlay(true)));
+    }
     app.current_tab = Tab::ViewEdits;
     studio.render_scenario_to_png(app, &out_dir.join("preview_07_view_edits.png"))?;
 
-    println!("All 7 UI previews successfully captured to {}", out_dir.display());
+    println!("Capturing UI preview 8/12: 3-Way Color Grade Wheels...");
+    // 8. preview_08_color_grade_wheels.png
+    let (mut app, _) = SnapApp::boot(None);
+    let _ = app.update(Message::LoadDemoScene);
+    let _ = app.update(Message::OpenTool(ToolId::ColorGrade));
+    let mut grade = ColorGradeParams::default();
+    grade.shadows = ColorWheelValue { hue_deg: 195.0, saturation: 48.0, luminance: -12.0 };
+    grade.highlights = ColorWheelValue { hue_deg: 42.0, saturation: 52.0, luminance: 18.0 };
+    grade.active_wheel = ColorWheelZone::Highlights;
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::ColorGrade(grade))));
+    app.current_tab = Tab::Tools;
+    studio.render_scenario_to_png(app, &out_dir.join("preview_08_color_grade_wheels.png"))?;
+
+    println!("Capturing UI preview 9/12: Selective U-Point Pins...");
+    // 9. preview_09_selective_upoint.png
+    let (mut app, _) = SnapApp::boot(None);
+    let _ = app.update(Message::LoadDemoScene);
+    let _ = app.update(Message::OpenTool(ToolId::Selective));
+    let mut sel = SelectiveParams::default();
+    sel.pins = vec![
+        SelectivePin { x: 0.38, y: 0.42, radius: 0.22, brightness: 28.0, contrast: 15.0, saturation: 10.0, structure: 8.0 },
+        SelectivePin { x: 0.68, y: 0.58, radius: 0.26, brightness: -18.0, contrast: 20.0, saturation: -12.0, structure: 0.0 },
+    ];
+    sel.active_pin = 0;
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::Selective(sel))));
+    app.current_tab = Tab::Tools;
+    studio.render_scenario_to_png(app, &out_dir.join("preview_09_selective_upoint.png"))?;
+
+    println!("Capturing UI preview 10/12: Halation & Grainy Film...");
+    // 10. preview_10_halation_grain.png
+    let (mut app, _) = SnapApp::boot(None);
+    let _ = app.update(Message::LoadDemoScene);
+    let _ = app.update(Message::OpenTool(ToolId::GrainyFilm));
+    let film = GrainyFilmParams {
+        stock: FilmStock::Cinestill800T,
+        grain: 45.0,
+        style_strength: 60.0,
+    };
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::GrainyFilm(film))));
+    let _ = app.update(Message::ApplyActiveTool);
+    let _ = app.update(Message::OpenTool(ToolId::Halation));
+    let _ = app.update(Message::SetSliderParamLive(0, 68.0));
+    let _ = app.update(Message::SetSliderParamLive(1, 75.0));
+    let _ = app.update(Message::SetSliderParamLive(2, 55.0));
+    app.current_tab = Tab::Tools;
+    studio.render_scenario_to_png(app, &out_dir.join("preview_10_halation_grain.png"))?;
+
+    println!("Capturing UI preview 11/12: Lens Blur & Bokeh...");
+    // 11. preview_11_lens_blur_bokeh.png
+    let (mut app, _) = SnapApp::boot(None);
+    let _ = app.update(Message::LoadDemoScene);
+    let _ = app.update(Message::OpenTool(ToolId::LensBlur));
+    let mut lblur = LensBlurParams::default();
+    lblur.shape = LensBlurShape::Elliptical;
+    lblur.center = [0.52, 0.46];
+    lblur.inner_radius = 0.22;
+    lblur.transition = 0.32;
+    lblur.angle_deg = 15.0;
+    lblur.blur_strength = 65.0;
+    lblur.bokeh_boost = 55.0;
+    lblur.vignette_strength = 20.0;
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::LensBlur(lblur))));
+    app.current_tab = Tab::Tools;
+    studio.render_scenario_to_png(app, &out_dir.join("preview_11_lens_blur_bokeh.png"))?;
+
+    println!("Capturing UI preview 12/12: Frames & Text Overlay...");
+    // 12. preview_12_frames_text.png
+    let (mut app, _) = SnapApp::boot(None);
+    let _ = app.update(Message::LoadDemoScene);
+    let _ = app.update(Message::OpenTool(ToolId::Frames));
+    let frames = FramesParams {
+        style: FrameStyle::GalleryLine,
+        width: 35.0,
+        inner_line: true,
+        aspect_pad: 20.0,
+    };
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::Frames(frames))));
+    let _ = app.update(Message::ApplyActiveTool);
+    let _ = app.update(Message::OpenTool(ToolId::TextOverlay));
+    let text_op = TextOverlayParams {
+        text: "SNAP STUDIO".to_string(),
+        subtext: "HDR REPAIR 2026".to_string(),
+        style: TextStyle::EditorialSerif,
+        center: [0.50, 0.78],
+        scale: 1.25,
+        opacity: 90.0,
+        invert_mask: false,
+        color_preset: TextColorPreset::Gold,
+    };
+    let _ = app.update(Message::ToolEditorExt(ToolEditorEvent::CommitOp(EditOp::TextOverlay(text_op))));
+    app.current_tab = Tab::Tools;
+    studio.render_scenario_to_png(app, &out_dir.join("preview_12_frames_text.png"))?;
+
+    println!("All 12 UI previews successfully captured to {}", out_dir.display());
     Ok(())
 }

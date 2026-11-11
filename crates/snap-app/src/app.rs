@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -8,15 +9,19 @@ use snap_core::config::{AppConfig, ExportFormat, ExportOptions, ResizeLongEdge};
 use snap_core::curves::CurveChannelId;
 use snap_core::image_types::{HistogramData, LinearImage, Lut3D, LutColorSpace};
 use snap_core::looks::{built_in_looks, LookId, LookPreset};
+use snap_core::mask::LayerMask;
 use snap_core::ops::{
     AspectRatio, BwColorFilter, BwPreset, CropRect, CropRotateParams, EditOp, HslBand,
     Lut3dParams, ToolId, TuneParams, WhiteBalanceParams,
 };
+use snap_core::ops_ext::HealStroke;
 use snap_core::stack::{EditNode, EditStack, HistoryManager, ToolSessionHistory};
 use snap_gpu::headless::HeadlessGpu;
 use snap_gpu::types::ViewportParams;
+use crate::canvas_overlays::CanvasOverlayEvent;
 use crate::curves_widget::CurvesEvent;
 use crate::sample_scene::generate_sample_hdr_scene;
+use crate::tool_editors_ext::ToolEditorEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -99,6 +104,17 @@ pub struct SnapApp {
     pub status_message: Option<(String, Instant)>,
     pub is_exporting: bool,
     pub save_look_name_input: String,
+    pub selective_add_pin_mode: bool,
+    pub secondary_images: HashMap<String, Arc<LinearImage>>,
+    pub mask_edit_node_id: Option<Uuid>,
+    pub mask_paint_mode: bool,
+    pub mask_eraser: bool,
+    pub mask_brush_radius: f32,
+    pub mask_brush_hardness: f32,
+    pub mask_target_opacity: f32,
+    pub mask_red_overlay: bool,
+    pub active_heal_stroke: Option<HealStroke>,
+    pub mask_stroke_backup: Option<EditStack>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +213,14 @@ pub enum Message {
     SetExportPreserveExif(bool),
     StartExport,
     ExportFinished(Result<(PathBuf, u32, u32, std::time::Duration), String>),
+
+    // Phase 2-4 Extensions
+    ToolEditorExt(ToolEditorEvent),
+    CanvasOverlay(CanvasOverlayEvent),
+    ToggleNodeMaskPanel(Uuid),
+    ImportXmpDialog,
+    XmpFileSelected(Option<PathBuf>),
+    DoubleExposureFileSelected(Option<PathBuf>),
 }
 
 impl SnapApp {
@@ -231,6 +255,17 @@ impl SnapApp {
             status_message: None,
             is_exporting: false,
             save_look_name_input: String::new(),
+            selective_add_pin_mode: false,
+            secondary_images: HashMap::new(),
+            mask_edit_node_id: None,
+            mask_paint_mode: false,
+            mask_eraser: false,
+            mask_brush_radius: 0.07,
+            mask_brush_hardness: 0.55,
+            mask_target_opacity: 1.0,
+            mask_red_overlay: false,
+            active_heal_stroke: None,
+            mask_stroke_backup: None,
         };
 
         if let Some(path) = initial_path {
@@ -248,10 +283,31 @@ impl SnapApp {
                     Message::LutImported,
                 );
                 return (app, task);
+            } else if snap_io::is_xmp_path(&path) {
+                let p = path.clone();
+                let task = Task::perform(
+                    async move { Some(p) },
+                    Message::XmpFileSelected,
+                );
+                return (app, task);
             }
         }
 
         (app, Task::none())
+    }
+
+    pub fn preload_secondary_images_for_stack(&mut self, stack: &EditStack) {
+        for node in &stack.nodes {
+            if let EditOp::DoubleExposure(ref p) = node.op {
+                if let Some(ref path_str) = p.secondary_path {
+                    if !self.secondary_images.contains_key(path_str) {
+                        if let Ok(img) = snap_io::load_image(std::path::Path::new(path_str)) {
+                            self.secondary_images.insert(path_str.clone(), Arc::new(img));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn effective_stack(&self) -> EditStack {
@@ -366,6 +422,7 @@ impl SnapApp {
 
                 // Load sidecar if present
                 if let Some(stack) = sidecar {
+                    self.preload_secondary_images_for_stack(&stack);
                     self.document_history = HistoryManager::new(stack);
                     self.set_status(format!("Opened {} (with .snap edits)", path.display()));
                 } else {
@@ -407,6 +464,12 @@ impl SnapApp {
                         async move { Self::install_and_load_lut(p).await },
                         Message::LutImported,
                     );
+                } else if snap_io::is_xmp_path(&path) {
+                    let p = path.clone();
+                    return Task::perform(
+                        async move { Some(p) },
+                        Message::XmpFileSelected,
+                    );
                 } else {
                     self.set_status(format!("Unsupported file: {}", path.display()));
                 }
@@ -441,6 +504,12 @@ impl SnapApp {
 
             Message::SelectTab(tab) => {
                 self.current_tab = tab;
+                if tab != Tab::Tools {
+                    self.selective_add_pin_mode = false;
+                }
+                if tab != Tab::ViewEdits {
+                    self.mask_paint_mode = false;
+                }
             }
 
             Message::ToggleSidebar => {
@@ -453,6 +522,8 @@ impl SnapApp {
             }
 
             Message::OpenTool(tool) => {
+                self.selective_add_pin_mode = false;
+                self.active_heal_stroke = None;
                 self.active_tool_session = Some(ActiveToolSession::new_tool(tool));
                 self.hist_dirty = true;
                 if tool == ToolId::CropRotate {
@@ -461,6 +532,8 @@ impl SnapApp {
             }
 
             Message::EditExistingNode(id) => {
+                self.selective_add_pin_mode = false;
+                self.active_heal_stroke = None;
                 if let Some(node) = self.document_history.current().nodes.iter().find(|n| n.id == id) {
                     self.active_tool_session = Some(ActiveToolSession::for_node(node));
                     self.hist_dirty = true;
@@ -471,6 +544,8 @@ impl SnapApp {
             }
 
             Message::ApplyActiveTool => {
+                self.selective_add_pin_mode = false;
+                self.active_heal_stroke = None;
                 if let Some(session) = self.active_tool_session.take() {
                     let op = session.live_op;
                     let mut stack = self.document_history.current().clone();
@@ -481,6 +556,7 @@ impl SnapApp {
                         stack.push_op(op);
                     }
 
+                    self.preload_secondary_images_for_stack(&stack);
                     self.document_history.commit(stack);
                     self.viewport_params.crop_preview_mode = false;
                     self.hist_dirty = true;
@@ -489,6 +565,8 @@ impl SnapApp {
             }
 
             Message::CancelActiveTool => {
+                self.selective_add_pin_mode = false;
+                self.active_heal_stroke = None;
                 if let Some(session) = self.active_tool_session.take() {
                     self.viewport_params.crop_preview_mode = false;
                     self.hist_dirty = true;
@@ -1013,6 +1091,7 @@ impl SnapApp {
                     .find(|l| l.id == id);
 
                 if let Some(l) = look {
+                    self.preload_secondary_images_for_stack(&l.stack);
                     self.document_history.commit(l.stack);
                     self.hist_dirty = true;
                     self.set_status(format!("Applied look: {}", l.name));
@@ -1167,6 +1246,15 @@ impl SnapApp {
 
                         tokio::task::spawn_blocking(move || {
                             let mut headless = HeadlessGpu::new().map_err(|e| e.to_string())?;
+                            for node in &effective_stack.nodes {
+                                if let EditOp::DoubleExposure(ref p) = node.op {
+                                    if let Some(ref path_str) = p.secondary_path {
+                                        if let Ok(sec) = snap_io::load_image(std::path::Path::new(path_str)) {
+                                            headless.upload_secondary_image(path_str, &sec);
+                                        }
+                                    }
+                                }
+                            }
                             let exported = headless
                                 .export_full_res(&source, &effective_stack, &needed_luts)
                                 .map_err(|e| e.to_string())?;
@@ -1204,6 +1292,291 @@ impl SnapApp {
                     }
                 }
             }
+
+            Message::ImportXmpDialog => {
+                let task = Task::perform(
+                    async {
+                        let handle = rfd::AsyncFileDialog::new()
+                            .add_filter("Adobe XMP Presets", &["xmp"])
+                            .pick_file()
+                            .await;
+                        handle.map(|f| f.path().to_path_buf())
+                    },
+                    Message::XmpFileSelected,
+                );
+                return task;
+            }
+
+            Message::XmpFileSelected(Some(path)) => {
+                let res = snap_io::install_xmp_preset(&path)
+                    .or_else(|_| snap_io::import_xmp_preset(&path));
+                match res {
+                    Ok(preset) => {
+                        let name = preset.name.clone();
+                        if let Some(pos) = self.custom_looks.iter().position(|l| l.id == preset.id) {
+                            self.custom_looks[pos] = preset.clone();
+                        } else {
+                            self.custom_looks.push(preset.clone());
+                        }
+                        self.preload_secondary_images_for_stack(&preset.stack);
+                        self.document_history.commit(preset.stack);
+                        self.hist_dirty = true;
+                        self.set_status(format!("Imported and applied XMP preset: {name}"));
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Failed to import XMP preset: {e}"));
+                    }
+                }
+            }
+
+            Message::XmpFileSelected(None) => {}
+
+            Message::DoubleExposureFileSelected(Some(path)) => {
+                let path_str = path.to_string_lossy().to_string();
+                if let Ok(img) = snap_io::load_image(&path) {
+                    let arc_img = Arc::new(img);
+                    self.secondary_images.insert(path_str.clone(), arc_img);
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::DoubleExposure(ref mut p) = session.live_op {
+                            p.secondary_path = Some(path_str.clone());
+                        }
+                        if let EditOp::DoubleExposure(p) = session.history.current_mut() {
+                            p.secondary_path = Some(path_str);
+                        }
+                        self.hist_dirty = true;
+                    }
+                    self.set_status(format!("Loaded secondary photo: {}", path.display()));
+                } else {
+                    self.set_status(format!("Failed to load secondary photo: {}", path.display()));
+                }
+            }
+
+            Message::DoubleExposureFileSelected(None) => {}
+
+            Message::ToggleNodeMaskPanel(id) => {
+                if self.mask_edit_node_id == Some(id) {
+                    self.mask_edit_node_id = None;
+                    self.mask_paint_mode = false;
+                } else {
+                    self.mask_edit_node_id = Some(id);
+                }
+            }
+
+            Message::ToolEditorExt(event) => match event {
+                ToolEditorEvent::PreviewOp(op) => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        session.live_op = op;
+                        self.hist_dirty = true;
+                    }
+                }
+                ToolEditorEvent::CommitOp(op) => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        session.live_op = op.clone();
+                        session.history.commit(op);
+                        self.hist_dirty = true;
+                    }
+                }
+                ToolEditorEvent::ToggleSelectiveAddPin(v) => {
+                    self.selective_add_pin_mode = v;
+                }
+                ToolEditorEvent::PickDoubleExposureImage => {
+                    let task = Task::perform(
+                        async {
+                            let handle = rfd::AsyncFileDialog::new()
+                                .add_filter(
+                                    "Supported Images",
+                                    &[
+                                        "jpg", "jpeg", "png", "tiff", "tif", "webp", "bmp", "dng",
+                                        "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
+                                    ],
+                                )
+                                .pick_file()
+                                .await;
+                            handle.map(|f| f.path().to_path_buf())
+                        },
+                        Message::DoubleExposureFileSelected,
+                    );
+                    return task;
+                }
+                ToolEditorEvent::MaskSetPaintMode { node_id, active } => {
+                    self.mask_edit_node_id = if active { Some(node_id) } else { None };
+                    self.mask_paint_mode = active;
+                }
+                ToolEditorEvent::MaskSetEraser(v) => {
+                    self.mask_eraser = v;
+                }
+                ToolEditorEvent::MaskSetBrushRadius(v) => {
+                    self.mask_brush_radius = v;
+                }
+                ToolEditorEvent::MaskSetBrushHardness(v) => {
+                    self.mask_brush_hardness = v;
+                }
+                ToolEditorEvent::MaskSetTargetOpacity(v) => {
+                    self.mask_target_opacity = v;
+                }
+                ToolEditorEvent::MaskToggleRedOverlay(v) => {
+                    self.mask_red_overlay = v;
+                }
+                ToolEditorEvent::MaskInvert(node_id) => {
+                    let mut stack = self.document_history.current().clone();
+                    if let Some(node) = stack.node_by_id_mut(node_id) {
+                        if let Some(ref mut mask) = node.mask {
+                            mask.invert();
+                        } else {
+                            let mut mask = LayerMask::full();
+                            mask.invert();
+                            node.mask = Some(mask);
+                        }
+                        self.document_history.commit(stack);
+                        self.hist_dirty = true;
+                    }
+                }
+                ToolEditorEvent::MaskClear(node_id) => {
+                    let mut stack = self.document_history.current().clone();
+                    if let Some(node) = stack.node_by_id_mut(node_id) {
+                        node.mask = Some(LayerMask::empty());
+                        self.document_history.commit(stack);
+                        self.hist_dirty = true;
+                    }
+                }
+                ToolEditorEvent::MaskResetFull(node_id) => {
+                    let mut stack = self.document_history.current().clone();
+                    if let Some(node) = stack.node_by_id_mut(node_id) {
+                        node.mask = Some(LayerMask::full());
+                        self.document_history.commit(stack);
+                        self.hist_dirty = true;
+                    }
+                }
+                ToolEditorEvent::MaskApplySmart { node_id, kind } => {
+                    if let Some(img) = self.source_image.as_deref() {
+                        let mask = LayerMask::from_smart_mask(kind, img);
+                        let mut stack = self.document_history.current().clone();
+                        if stack.set_node_mask(node_id, Some(mask)) {
+                            self.document_history.commit(stack);
+                            self.hist_dirty = true;
+                            self.set_status(format!("Applied {} smart mask", kind.display_name()));
+                        }
+                    }
+                }
+            },
+
+            Message::CanvasOverlay(event) => match event {
+                CanvasOverlayEvent::PreviewOp(op) => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        session.live_op = op;
+                        self.hist_dirty = true;
+                    }
+                }
+                CanvasOverlayEvent::CommitOp(op) => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        session.live_op = op.clone();
+                        session.history.commit(op);
+                        self.hist_dirty = true;
+                    }
+                }
+                CanvasOverlayEvent::BrushStrokeSegment { from, to } => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::Brush(ref mut p) = session.live_op {
+                            p.map.paint_stroke(
+                                from[0],
+                                from[1],
+                                to[0],
+                                to[1],
+                                p.radius,
+                                p.feather,
+                                p.step,
+                                p.eraser,
+                            );
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::BrushStrokeEnd => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::Brush(_) = session.live_op {
+                            session.history.commit(session.live_op.clone());
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::HealStrokeStart { uv } => {
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::Healing(ref mut p) = session.live_op {
+                            let stroke = HealStroke {
+                                points: vec![uv],
+                                radius: p.brush_radius,
+                                source_offset: None,
+                            };
+                            p.strokes.push(stroke.clone());
+                            self.active_heal_stroke = Some(stroke);
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::HealStrokeMove { uv } => {
+                    if let Some(ref mut stroke) = self.active_heal_stroke {
+                        stroke.points.push(uv);
+                    }
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::Healing(ref mut p) = session.live_op {
+                            if let Some(last) = p.strokes.last_mut() {
+                                last.points.push(uv);
+                            }
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::HealStrokeEnd => {
+                    self.active_heal_stroke = None;
+                    if let Some(ref mut session) = self.active_tool_session {
+                        if let EditOp::Healing(_) = session.live_op {
+                            session.history.commit(session.live_op.clone());
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::MaskStrokeSegment { node_id, from, to } => {
+                    if self.mask_stroke_backup.is_none() {
+                        self.mask_stroke_backup = Some(self.document_history.current().clone());
+                    }
+                    let eff_opacity = if self.mask_eraser {
+                        0.0
+                    } else {
+                        self.mask_target_opacity
+                    };
+                    let stack = self.document_history.current_mut();
+                    if let Some(node) = stack.node_by_id_mut(node_id) {
+                        if node.mask.is_none() {
+                            let init_mask = if self.mask_eraser || self.mask_target_opacity < 0.5 {
+                                LayerMask::full()
+                            } else {
+                                LayerMask::empty()
+                            };
+                            node.mask = Some(init_mask);
+                        }
+                        if let Some(ref mut mask) = node.mask {
+                            mask.paint_stroke(
+                                from[0],
+                                from[1],
+                                to[0],
+                                to[1],
+                                self.mask_brush_radius,
+                                self.mask_brush_hardness,
+                                eff_opacity,
+                            );
+                            self.hist_dirty = true;
+                        }
+                    }
+                }
+                CanvasOverlayEvent::MaskStrokeEnd { node_id: _ } => {
+                    if let Some(backup) = self.mask_stroke_backup.take() {
+                        let modified = self.document_history.current().clone();
+                        *self.document_history.current_mut() = backup;
+                        self.document_history.commit(modified);
+                        self.hist_dirty = true;
+                    }
+                }
+            },
         }
 
         Task::none()

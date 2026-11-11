@@ -4,7 +4,9 @@ pub mod curves;
 pub mod error;
 pub mod image_types;
 pub mod looks;
+pub mod mask;
 pub mod ops;
+pub mod ops_ext;
 pub mod stack;
 
 // Clean top-level re-exports
@@ -19,11 +21,14 @@ pub use curves::{CurveChannel, CurveChannelId, CurvePoint, CurvePreset, CurvesPa
 pub use error::CoreError;
 pub use image_types::{HistogramData, ImageMetadata, LinearImage, Lut3D, LutColorSpace};
 pub use looks::{built_in_looks, LookId, LookPreset};
+pub use mask::{BrushMap, LayerMask, SmartMaskKind, MASK_DIM};
 pub use ops::{
     AspectRatio, BwColorFilter, BwParams, BwPreset, ColorHslParams, CropRect, CropRotateParams,
     DetailsParams, EditOp, HslBand, HslChannelShift, Lut3dParams, ParamDescriptor,
-    RawDevelopParams, ToolId, TuneParams, VignetteParams, WhiteBalanceParams, WbPreset,
+    RawDevelopParams, ToolCategory, ToolId, TuneParams, VignetteParams, WbPreset,
+    WhiteBalanceParams,
 };
+pub use ops_ext::*;
 pub use stack::{EditNode, EditStack, HistoryManager, ToolSessionHistory, DEFAULT_MAX_HISTORY};
 
 pub fn version() -> &'static str {

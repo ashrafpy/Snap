@@ -1,10 +1,12 @@
 pub mod app;
+pub mod canvas_overlays;
 pub mod canvas_shader;
 pub mod curves_widget;
 pub mod histogram_widget;
 pub mod icons;
 pub mod sample_scene;
 pub mod theme;
+pub mod tool_editors_ext;
 pub mod ui_preview;
 pub mod views;
 
@@ -94,6 +96,7 @@ mod tests {
             bypass_edits: false,
             viewport_params: ViewportParams::default(),
             needed_luts: Vec::new(),
+            needed_secondary_images: Vec::new(),
             hist_slot: None,
             hist_dirty: false,
             active_tool: None,
@@ -207,5 +210,185 @@ mod tests {
         if let EditOp::TuneImage(ref tune) = effective_after_undo.nodes[0].op {
             assert_eq!(tune.brightness, 0.0);
         }
+    }
+
+    #[test]
+    fn test_color_grade_tool_state_transitions() {
+        let (mut app, _) = SnapApp::boot(None);
+        let img = sample_scene::generate_sample_hdr_scene();
+        app.source_image = Some(Arc::new(img));
+
+        // Open ColorGrade tool
+        let _ = app.update(Message::OpenTool(ToolId::ColorGrade));
+        assert!(app.active_tool_session.is_some());
+        assert_eq!(app.active_tool_session.as_ref().unwrap().tool, ToolId::ColorGrade);
+
+        // Preview live change via ToolEditorExt
+        let mut grade = snap_core::ops_ext::ColorGradeParams::default();
+        grade.shadows.saturation = 45.0;
+        grade.shadows.hue_deg = 190.0;
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::PreviewOp(EditOp::ColorGrade(grade.clone())),
+        ));
+
+        let effective = app.effective_stack();
+        assert_eq!(effective.nodes.len(), 1);
+        if let EditOp::ColorGrade(ref g) = effective.nodes[0].op {
+            assert_eq!(g.shadows.saturation, 45.0);
+            assert_eq!(g.shadows.hue_deg, 190.0);
+        } else {
+            panic!("Expected ColorGrade op");
+        }
+
+        // Commit live change
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::CommitOp(EditOp::ColorGrade(grade)),
+        ));
+
+        // Apply active tool
+        let _ = app.update(Message::ApplyActiveTool);
+        assert!(app.active_tool_session.is_none());
+        assert_eq!(app.document_history.current().nodes.len(), 1);
+
+        // Undo removes node
+        let _ = app.update(Message::Undo);
+        assert!(app.document_history.current().is_empty());
+
+        // Redo restores node
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.document_history.current().nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_selective_pin_add_mode_transitions() {
+        let (mut app, _) = SnapApp::boot(None);
+        let img = sample_scene::generate_sample_hdr_scene();
+        app.source_image = Some(Arc::new(img));
+
+        let _ = app.update(Message::OpenTool(ToolId::Selective));
+        assert!(!app.selective_add_pin_mode);
+
+        // Toggle add pin mode on
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::ToggleSelectiveAddPin(true),
+        ));
+        assert!(app.selective_add_pin_mode);
+
+        // Commit a pin
+        let mut sel = snap_core::ops_ext::SelectiveParams::default();
+        sel.pins.push(snap_core::ops_ext::SelectivePin {
+            x: 0.4,
+            y: 0.6,
+            radius: 0.2,
+            brightness: 25.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            structure: 0.0,
+        });
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::CommitOp(EditOp::Selective(sel)),
+        ));
+
+        // Switching / closing tool resets selective_add_pin_mode
+        let _ = app.update(Message::CancelActiveTool);
+        assert!(!app.selective_add_pin_mode);
+        assert!(app.active_tool_session.is_none());
+    }
+
+    #[test]
+    fn test_layer_mask_smart_mask_transitions() {
+        let (mut app, _) = SnapApp::boot(None);
+        let img = sample_scene::generate_sample_hdr_scene();
+        app.source_image = Some(Arc::new(img));
+
+        // Apply Details tool
+        let _ = app.update(Message::OpenTool(ToolId::Details));
+        let _ = app.update(Message::SetSliderParamLive(0, 30.0));
+        let _ = app.update(Message::ApplyActiveTool);
+        assert_eq!(app.document_history.current().nodes.len(), 1);
+
+        let node_id = app.document_history.current().nodes[0].id;
+        assert!(app.document_history.current().nodes[0].mask.is_none());
+
+        // Toggle mask panel
+        let _ = app.update(Message::ToggleNodeMaskPanel(node_id));
+        assert_eq!(app.mask_edit_node_id, Some(node_id));
+
+        // Apply Smart Mask: Sky
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::MaskApplySmart {
+                node_id,
+                kind: snap_core::mask::SmartMaskKind::Sky,
+            },
+        ));
+
+        let current_node = &app.document_history.current().nodes[0];
+        assert!(current_node.mask.is_some());
+        let mask = current_node.mask.as_ref().unwrap();
+        assert!(!mask.is_uniform_full());
+        assert!(!mask.is_uniform_zero());
+
+        // Invert mask
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::MaskInvert(node_id),
+        ));
+        assert!(app.document_history.current().nodes[0].mask.is_some());
+
+        // Clear mask
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::MaskClear(node_id),
+        ));
+        assert!(app.document_history.current().nodes[0].mask.as_ref().unwrap().is_uniform_zero());
+
+        // Reset full mask
+        let _ = app.update(Message::ToolEditorExt(
+            crate::tool_editors_ext::ToolEditorEvent::MaskResetFull(node_id),
+        ));
+        assert!(app.document_history.current().nodes[0].mask.as_ref().unwrap().is_uniform_full());
+    }
+
+    #[test]
+    fn test_xmp_preset_import_and_apply() {
+        let (mut app, _) = SnapApp::boot(None);
+        let img = sample_scene::generate_sample_hdr_scene();
+        app.source_image = Some(Arc::new(img));
+
+        let xmp_xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:PresetType="Normal"
+    crs:Cluster=""
+    crs:UUID="TEST-XMP-UUID"
+    crs:SupportsAmount="False"
+    crs:ProcessVersion="11.0"
+    crs:Exposure2012="+0.50"
+    crs:Contrast2012="+25"
+    crs:Highlights2012="-30"
+    crs:Shadows2012="+20"
+    crs:Temperature="6500"
+    crs:Tint="+10">
+   <crs:Name>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">Warm Test Look</rdf:li>
+    </rdf:Alt>
+   </crs:Name>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"#;
+
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join(format!("snap_test_xmp_{}.xmp", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_path, xmp_xml).expect("Failed to write test xmp file");
+
+        let _ = app.update(Message::XmpFileSelected(Some(temp_path.clone())));
+        let _ = std::fs::remove_file(temp_path);
+
+        // Check custom_looks contains the look
+        assert!(app.custom_looks.iter().any(|l| l.name == "Warm Test Look"));
+
+        // Check current stack reflects the preset
+        let current_stack = app.document_history.current();
+        assert!(!current_stack.is_empty());
     }
 }

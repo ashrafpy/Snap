@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::mask::LayerMask;
 use crate::ops::{CropRotateParams, EditOp};
 
 pub const DEFAULT_MAX_HISTORY: usize = 100;
@@ -12,6 +13,8 @@ pub struct EditNode {
     pub enabled: bool,
     pub opacity: f32, // 0.0..=1.0
     pub op: EditOp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<LayerMask>,
 }
 
 impl EditNode {
@@ -21,6 +24,17 @@ impl EditNode {
             enabled: true,
             opacity: 1.0,
             op,
+            mask: None,
+        }
+    }
+
+    pub fn with_mask(op: EditOp, mask: LayerMask) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            enabled: true,
+            opacity: 1.0,
+            op,
+            mask: Some(mask),
         }
     }
 }
@@ -78,6 +92,36 @@ impl EditStack {
         } else {
             false
         }
+    }
+
+    /// Set a node's opacity by UUID.
+    pub fn set_node_opacity(&mut self, id: Uuid, opacity: f32) -> bool {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            node.opacity = opacity.clamp(0.0, 1.0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set or clear a node's mask by UUID.
+    pub fn set_node_mask(&mut self, id: Uuid, mask: Option<LayerMask>) -> bool {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
+            node.mask = mask;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Look up a node reference by UUID.
+    pub fn node_by_id(&self, id: Uuid) -> Option<&EditNode> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Look up a mutable node reference by UUID.
+    pub fn node_by_id_mut(&mut self, id: Uuid) -> Option<&mut EditNode> {
+        self.nodes.iter_mut().find(|n| n.id == id)
     }
 
     /// Toggle the enabled/disabled state of a node by UUID.

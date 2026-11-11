@@ -35,6 +35,31 @@ pub fn tool_short_label(tool: ToolId) -> &'static str {
         ToolId::BlackAndWhite => "B&W",
         ToolId::Vignette => "Vignette",
         ToolId::CropRotate => "Crop",
+        ToolId::ColorGrade => "Grade",
+        ToolId::Dehaze => "Dehaze",
+        ToolId::TonalContrast => "Tonal",
+        ToolId::Perspective => "Persp",
+        ToolId::Expand => "Expand",
+        ToolId::Selective => "Select",
+        ToolId::Brush => "Brush",
+        ToolId::Healing => "Heal",
+        ToolId::Halation => "Halo",
+        ToolId::Bloom => "Bloom",
+        ToolId::GrainyFilm => "Film",
+        ToolId::Noir => "Noir",
+        ToolId::HdrScape => "HDR",
+        ToolId::GlamourGlow => "Glow",
+        ToolId::Drama => "Drama",
+        ToolId::Vintage => "Vintage",
+        ToolId::DoubleExposure => "Dbl Exp",
+        ToolId::Retrolux => "Retrolux",
+        ToolId::Grunge => "Grunge",
+        ToolId::LensBlur => "Lens Blur",
+        ToolId::MotionBlur => "Motion",
+        ToolId::Portrait => "Portrait",
+        ToolId::HeadPose => "Pose",
+        ToolId::Frames => "Frames",
+        ToolId::TextOverlay => "Text",
     }
 }
 
@@ -527,8 +552,8 @@ fn render_floating_top_overlay<'a>(app: &'a SnapApp) -> Element<'a, Message> {
 
             let val_str = if desc.unit == "%" {
                 format!("{:.0}%", val)
-            } else if desc.unit == "°" {
-                format!("{:+.*}°", 1, val)
+            } else if desc.unit == "deg" {
+                format!("{:+.*} deg", 1, val)
             } else if desc.unit == "EV" {
                 format!("{:+.*} EV", 1, val)
             } else if (desc.step - 1.0).abs() < 1e-3 || desc.step >= 1.0 {
@@ -652,8 +677,8 @@ fn render_vertical_picker_overlay<'a>(app: &'a SnapApp) -> Element<'a, Message> 
 
         let val_str = if desc.unit == "%" {
             format!("{:.0}%", val)
-        } else if desc.unit == "°" {
-            format!("{:+.*}°", 1, val)
+        } else if desc.unit == "deg" {
+            format!("{:+.*} deg", 1, val)
         } else if desc.unit == "EV" {
             format!("{:+.*} EV", 1, val)
         } else if (desc.step - 1.0).abs() < 1e-3 || desc.step >= 1.0 {
@@ -787,6 +812,11 @@ fn render_photo_stage<'a>(app: &'a SnapApp) -> Element<'a, Message> {
         bypass_edits: app.bypass_edits,
         viewport_params: app.viewport_params.clone(),
         needed_luts: app.lut_library.clone(),
+        needed_secondary_images: app
+            .secondary_images
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         hist_slot: Some(app.hist_slot.clone()),
         hist_dirty: app.hist_dirty,
         active_tool: app.active_tool_session.as_ref().map(|s| s.tool),
@@ -816,12 +846,44 @@ fn render_photo_stage<'a>(app: &'a SnapApp) -> Element<'a, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+
+    let mask_edit_node: Option<(uuid::Uuid, Option<&'a snap_core::mask::LayerMask>)> =
+        if app.current_tab == Tab::ViewEdits {
+            app.mask_edit_node_id.and_then(|id| {
+                app.document_history
+                    .current()
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .map(|n| (n.id, n.mask.as_ref()))
+            })
+        } else {
+            None
+        };
+
+    let overlay_ctx = crate::canvas_overlays::CanvasOverlayContext {
+        image_dims: app.source_image.as_ref().map(|img| (img.width, img.height)),
+        viewport_params: app.viewport_params.clone(),
+        active_tool: app.active_tool_session.as_ref().map(|s| s.tool),
+        active_op: app.active_tool_session.as_ref().map(|s| &s.live_op),
+        selective_add_pin_mode: app.selective_add_pin_mode,
+        mask_edit_node,
+        mask_paint_active: app.mask_paint_mode,
+        mask_brush_radius: app.mask_brush_radius,
+        show_red_mask_overlay: app.mask_red_overlay,
+        bypass_edits: app.bypass_edits,
+    };
+
+    let overlay_layer: Element<'a, Message> =
+        crate::canvas_overlays::view_canvas_overlay(overlay_ctx)
+            .map(Message::CanvasOverlay);
+
     let layer1 = render_floating_top_overlay(app);
     let layer2 = render_vertical_picker_overlay(app);
     let layer3 = render_viewport_dock(app);
     let layer4 = render_status_toast(app);
 
-    container(stack![layer0, layer1, layer2, layer3, layer4])
+    container(stack![layer0, overlay_layer, layer1, layer2, layer3, layer4])
         .width(Length::Fill)
         .height(Length::Fill)
         .style(theme::canvas_backdrop)
@@ -969,7 +1031,22 @@ fn render_active_tool_panel<'a>(
         ToolId::BlackAndWhite => render_bw_controls(session),
         ToolId::Vignette => render_vignette_controls(session),
         ToolId::CropRotate => render_crop_controls(app, session),
-        _ => render_standard_sliders(session),
+        _ => {
+            if let Some(custom) = crate::tool_editors_ext::view_tool_custom_controls(
+                &session.live_op,
+                app.selective_add_pin_mode,
+            ) {
+                let sliders = render_standard_sliders(session);
+                column![
+                    custom.map(Message::ToolEditorExt),
+                    sliders,
+                ]
+                .spacing(12)
+                .into()
+            } else {
+                render_standard_sliders(session)
+            }
+        }
     };
 
     let controls_scroll = scrollable(
@@ -1048,8 +1125,8 @@ fn render_standard_sliders<'a>(session: &'a ActiveToolSession) -> Element<'a, Me
 
         let val_str = if desc.unit == "%" {
             format!("{:.0}%", val)
-        } else if desc.unit == "°" {
-            format!("{:+.*}°", 1, val)
+        } else if desc.unit == "deg" {
+            format!("{:+.*} deg", 1, val)
         } else if desc.unit == "EV" {
             format!("{:+.*} EV", 1, val)
         } else if (desc.step - 1.0).abs() < 1e-3 || desc.step >= 1.0 {
@@ -1735,38 +1812,34 @@ fn render_4tab_inspector<'a>(app: &'a SnapApp) -> Element<'a, Message> {
 // ---------------------------------------------------------------------------
 
 fn render_tools_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {
-    let sections: [(&'static str, &'static [ToolId]); 3] = [
-        (
-            "TONE & DETAIL",
-            &[
-                ToolId::TuneImage,
-                ToolId::Details,
-                ToolId::Curves,
-                ToolId::RawDevelop,
-            ],
-        ),
-        (
-            "COLOR & FILM",
-            &[
-                ToolId::WhiteBalance,
-                ToolId::ColorHsl,
-                ToolId::BlackAndWhite,
-                ToolId::Lut3d,
-            ],
-        ),
-        (
-            "GEOMETRY & CREATIVE",
-            &[ToolId::CropRotate, ToolId::Vignette],
-        ),
-    ];
+    let is_raw = app
+        .current_image_path
+        .as_ref()
+        .map(|p| snap_io::is_raw_path(p))
+        .unwrap_or(false);
 
-    let mut main_col = column![].spacing(14);
+    let mut main_col = column![].spacing(16);
 
-    for (cat_title, tools) in sections {
-        let mut cat_col = column![
+    for &category in snap_core::ops::ToolCategory::ALL {
+        let tools = ToolId::in_category(category);
+        let cat_title = category.display_name().to_uppercase();
+        let cat_count = tools.len();
+
+        let header_row = row![
             text(cat_title).size(11).color(palette::TEXT_MUTED),
+            space::horizontal(),
+            container(
+                text(format!("{cat_count}"))
+                    .size(9)
+                    .color(palette::TEXT_SECONDARY),
+            )
+            .padding([2, 6])
+            .style(theme::badge_pill_style(palette::BG_SUNKEN, palette::BORDER_SUBTLE)),
         ]
-        .spacing(6);
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        let mut cat_col = column![header_row].spacing(8);
 
         for chunk in tools.chunks(2) {
             let mut pair_row = row![].spacing(8);
@@ -1775,24 +1848,56 @@ fn render_tools_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {
                 let fav_icon = if is_fav { Icon::StarFilled } else { Icon::Star };
                 let fav_col = if is_fav { palette::AMBER } else { palette::TEXT_MUTED };
 
-                let tile_content = container(
-                    column![
-                        icon(Icon::for_tool(tool), 22.0, palette::ACCENT),
-                        text(tool.display_name()).size(12.5).color(palette::TEXT_PRIMARY),
-                    ]
-                    .spacing(7)
-                    .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill);
+                let is_active = app
+                    .active_tool_session
+                    .as_ref()
+                    .map(|s| s.tool == tool)
+                    .unwrap_or(false);
+
+                let is_raw_develop = tool == ToolId::RawDevelop;
+                let raw_badge: Option<Element<'a, Message>> = if is_raw_develop {
+                    let badge_text = if is_raw { "RAW" } else { "RAW ONLY" };
+                    let badge_col = if is_raw { palette::ACCENT } else { palette::TEXT_MUTED };
+                    Some(
+                        container(
+                            text(badge_text)
+                                .size(8)
+                                .color(badge_col),
+                        )
+                        .padding([1, 4])
+                        .style(theme::badge_pill_style(palette::BG_SUNKEN, palette::BORDER_SUBTLE))
+                        .into(),
+                    )
+                } else {
+                    None
+                };
+
+                let mut tile_inner = column![
+                    icon(
+                        Icon::for_tool(tool),
+                        20.0,
+                        if is_active { palette::ACCENT } else { palette::TEXT_SECONDARY },
+                    ),
+                    text(tool.display_name()).size(12.0).color(palette::TEXT_PRIMARY),
+                ]
+                .spacing(5)
+                .align_x(Alignment::Center);
+
+                if let Some(rb) = raw_badge {
+                    tile_inner = tile_inner.push(rb);
+                }
+
+                let tile_content = container(tile_inner)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill);
 
                 let tile_btn = button(tile_content)
                     .width(Length::Fill)
                     .height(Length::Fixed(76.0))
                     .padding(0)
-                    .style(theme::tool_tile_button(false))
+                    .style(theme::tool_tile_button(is_active))
                     .on_press(Message::OpenTool(tool));
 
                 let star_btn = button(icon(fav_icon, 13.0, fav_col))
@@ -1864,7 +1969,24 @@ fn render_looks_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {
     .width(Length::FillPortion(1))
     .on_press(Message::PasteStack);
 
-    let top_row = row![copy_btn, paste_btn].spacing(8);
+    let import_xmp_btn = button(
+        container(
+            row![
+                icon(Icon::Download, 13.0, palette::TEXT_SECONDARY),
+                text("Import .XMP").size(12).color(palette::TEXT_SECONDARY),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .align_x(Horizontal::Center),
+    )
+    .padding([6, 10])
+    .style(theme::secondary_button)
+    .width(Length::FillPortion(1))
+    .on_press(Message::ImportXmpDialog);
+
+    let top_row = row![copy_btn, paste_btn, import_xmp_btn].spacing(6);
 
     let mut built_in_col = column![
         text("BUILT-IN LOOKS").size(11).color(palette::TEXT_MUTED),
@@ -2058,18 +2180,35 @@ fn render_view_edits_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {
                 .style(theme::subtle_danger_button)
                 .on_press(Message::DeleteNode(id));
 
-            let top_row = row![
+            let is_crop = node.op.tool_id() == ToolId::CropRotate;
+            let is_mask_open = app.mask_edit_node_id == Some(id);
+            let mask_highlighted = node.mask.is_some() || is_mask_open;
+            let mask_color = if mask_highlighted {
+                palette::ACCENT
+            } else {
+                palette::TEXT_MUTED
+            };
+
+            let mut top_row = row![
                 toggle_btn,
                 tool_icon,
                 title_btn,
                 space::horizontal(),
                 up_btn,
                 down_btn,
-                edit_btn,
-                trash_btn,
             ]
             .spacing(4)
             .align_y(Alignment::Center);
+
+            if !is_crop {
+                let mask_btn = button(icon(Icon::Mask, 12.0, mask_color))
+                    .padding([2, 4])
+                    .style(theme::ghost_icon_button(mask_highlighted))
+                    .on_press(Message::ToggleNodeMaskPanel(id));
+                top_row = top_row.push(mask_btn);
+            }
+
+            top_row = top_row.push(edit_btn).push(trash_btn);
 
             let opacity_row = row![
                 text("Opacity").size(11).color(palette::TEXT_MUTED),
@@ -2083,12 +2222,33 @@ fn render_view_edits_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {
             .spacing(8)
             .align_y(Alignment::Center);
 
-            let card = container(
-                column![top_row, opacity_row].spacing(6),
-            )
-            .padding(10)
-            .style(card_style)
-            .width(Length::Fill);
+            let mut card_col = column![top_row, opacity_row].spacing(6);
+
+            if is_mask_open && !is_crop {
+                let props = crate::tool_editors_ext::MaskInspectorProps {
+                    node_id: id,
+                    has_mask: node.mask.is_some(),
+                    is_paint_mode: app.mask_paint_mode,
+                    is_eraser: app.mask_eraser,
+                    brush_radius: app.mask_brush_radius,
+                    brush_hardness: app.mask_brush_hardness,
+                    target_opacity: app.mask_target_opacity,
+                    red_overlay: app.mask_red_overlay,
+                    node_title: node.op.tool_id().display_name(),
+                };
+                card_col = card_col.push(
+                    container(
+                        crate::tool_editors_ext::view_layer_mask_inspector(props)
+                            .map(Message::ToolEditorExt),
+                    )
+                    .padding([6, 0]),
+                );
+            }
+
+            let card = container(card_col)
+                .padding(10)
+                .style(card_style)
+                .width(Length::Fill);
 
             layers_col = layers_col.push(card);
         }

@@ -82,6 +82,7 @@ pub struct SnapShaderPrimitive {
     pub bypass_edits: bool,
     pub viewport_params: ViewportParams,
     pub needed_luts: Vec<Lut3D>,
+    pub needed_secondary_images: Vec<(String, Arc<LinearImage>)>,
     pub hist_slot: Option<Arc<Mutex<Option<HistogramData>>>>,
     pub hist_dirty: bool,
     pub is_dragging: bool,
@@ -108,6 +109,11 @@ impl shader::Primitive for SnapShaderPrimitive {
         // 2. Upload any needed LUTs
         for lut in &self.needed_luts {
             let _ = engine.upload_lut(device, queue, lut);
+        }
+
+        // 2b. Upload any needed secondary images
+        for (key, img) in &self.needed_secondary_images {
+            engine.upload_secondary_image(device, queue, key, img);
         }
 
         // 3. Process edit stack compute passes
@@ -187,6 +193,7 @@ pub struct CanvasShaderProgram<'a> {
     pub bypass_edits: bool,
     pub viewport_params: ViewportParams,
     pub needed_luts: Vec<Lut3D>,
+    pub needed_secondary_images: Vec<(String, Arc<LinearImage>)>,
     pub hist_slot: Option<Arc<Mutex<Option<HistogramData>>>>,
     pub hist_dirty: bool,
     pub active_tool: Option<ToolId>,
@@ -585,6 +592,7 @@ impl<'a> shader::Program<crate::app::Message> for CanvasShaderProgram<'a> {
             bypass_edits: self.bypass_edits,
             viewport_params: self.viewport_params.clone(),
             needed_luts: self.needed_luts.clone(),
+            needed_secondary_images: self.needed_secondary_images.clone(),
             hist_slot: self.hist_slot.clone(),
             hist_dirty: self.hist_dirty,
             is_dragging: state.drag_mode.is_some(),

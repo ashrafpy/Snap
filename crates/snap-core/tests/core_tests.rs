@@ -454,3 +454,366 @@ fn test_slider_params_hud() {
         panic!("expected TuneImage op");
     }
 }
+
+// ============================================================================
+// Phase 2-4 Tests: LayerMask, BrushMap, SmartMaskKind, & 35 Editing Tools
+// ============================================================================
+
+#[test]
+fn test_layer_mask_paint_and_serde() {
+    let mut mask = LayerMask::empty();
+    assert!(mask.is_uniform_zero());
+    assert!(!mask.is_uniform_full());
+    assert_eq!(mask.as_bytes().len(), 65536);
+
+    let hash_empty = mask.content_hash();
+    assert_ne!(hash_empty, 0);
+
+    // Paint dab in center
+    mask.paint_dab(0.5, 0.5, 0.20, 0.5, 1.0);
+    assert!(!mask.is_uniform_zero());
+    assert_ne!(mask.content_hash(), hash_empty);
+
+    // Sample center vs outside
+    let center_val = mask.sample_bilinear(0.5, 0.5);
+    assert!(
+        center_val > 0.95,
+        "Center of dab should be close to 1.0, got {center_val}"
+    );
+
+    let corner_val = mask.sample_bilinear(0.05, 0.05);
+    assert_eq!(corner_val, 0.0);
+
+    // Paint stroke
+    mask.paint_stroke(0.1, 0.2, 0.9, 0.2, 0.04, 0.8, 1.0);
+    let mid_stroke = mask.sample_bilinear(0.5, 0.2);
+    assert!(
+        mid_stroke > 0.9,
+        "Midpoint of stroke should be painted, got {mid_stroke}"
+    );
+
+    // Invert mask
+    mask.invert();
+    let inverted_corner = mask.sample_bilinear(0.05, 0.05);
+    assert!(
+        inverted_corner > 0.95,
+        "Inverted empty region should be near 1.0, got {inverted_corner}"
+    );
+
+    // Test Compact JSON serialization
+    let full_json = serde_json::to_string(&LayerMask::full()).expect("serialize full mask");
+    assert!(full_json.len() < 64, "Uniform mask RLE must be tiny, got {}", full_json.len());
+
+    let json = serde_json::to_string(&mask).expect("serialize mask");
+    assert!(
+        json.starts_with("\"rle1:"),
+        "LayerMask must serialize as compact rle1 string, got: {json}"
+    );
+    assert!(
+        json.len() < 65_536,
+        "RLE JSON string must stay compact vs raw JSON array (~260KB), got length {}",
+        json.len()
+    );
+
+    let roundtrip: LayerMask = serde_json::from_str(&json).expect("deserialize mask");
+    assert_eq!(mask, roundtrip);
+    assert_eq!(mask.content_hash(), roundtrip.content_hash());
+
+    // Test backward compatibility: EditNode deserialization without "mask" field
+    let legacy_json = r#"{
+        "id": "11111111-2222-3333-4444-555555555555",
+        "enabled": true,
+        "opacity": 0.85,
+        "op": {
+            "TuneImage": {
+                "brightness": 12.0,
+                "contrast": 5.0,
+                "saturation": 0.0,
+                "ambiance": 0.0,
+                "highlights": 0.0,
+                "shadows": 0.0,
+                "warmth": 0.0
+            }
+        }
+    }"#;
+    let node: EditNode = serde_json::from_str(legacy_json).expect("deserialize legacy node");
+    assert_eq!(node.opacity, 0.85);
+    assert_eq!(node.mask, None);
+
+    // Test EditNode with mask serializes and deserializes
+    let node_with_mask = EditNode::with_mask(
+        EditOp::Details(DetailsParams::default()),
+        LayerMask::full(),
+    );
+    let node_json = serde_json::to_string(&node_with_mask).expect("serialize node with mask");
+    assert!(node_json.contains("mask"));
+    let node_roundtrip: EditNode = serde_json::from_str(&node_json).expect("roundtrip node with mask");
+    assert_eq!(node_with_mask, node_roundtrip);
+}
+
+#[test]
+fn test_brush_map_paint_and_serde() {
+    let mut map = BrushMap::new();
+    assert!(map.is_empty());
+    assert_eq!(map.to_f32_vec().len(), 65536);
+
+    let hash_empty = map.content_hash();
+    assert_ne!(hash_empty, 0);
+
+    // Paint stroke with positive step
+    map.paint_stroke(0.2, 0.5, 0.8, 0.5, 0.10, 0.4, 50.0, false);
+    assert!(!map.is_empty());
+    assert_ne!(map.content_hash(), hash_empty);
+
+    let center_val = map.sample_bilinear(0.5, 0.5);
+    assert!(
+        center_val > 0.40 && center_val <= 1.0,
+        "Center should have positive brush value, got {center_val}"
+    );
+
+    // Test eraser mode on brush
+    map.paint_dab(0.5, 0.5, 0.15, 0.0, 0.0, true);
+    let erased_val = map.sample_bilinear(0.5, 0.5);
+    assert!(
+        erased_val.abs() < 0.1,
+        "Erased center should be near 0, got {erased_val}"
+    );
+
+    // Test to_f32_vec values are in [-1.0, 1.0]
+    let f32_vec = map.to_f32_vec();
+    assert_eq!(f32_vec.len(), 65536);
+    for &v in &f32_vec {
+        assert!(v >= -1.0 && v <= 1.0, "Float out of bounds: {v}");
+    }
+
+    // Test compact serde roundtrip
+    let json = serde_json::to_string(&map).expect("serialize brush map");
+    assert!(json.starts_with("\"brle1:"));
+    let roundtrip: BrushMap = serde_json::from_str(&json).expect("deserialize brush map");
+    assert_eq!(map, roundtrip);
+    assert_eq!(map.content_hash(), roundtrip.content_hash());
+}
+
+#[test]
+fn test_smart_masks_all_variants() {
+    // Construct a synthetic 64x64 test image:
+    // Top half: bright cool sky (Rec.2020 blue/cyan, elevated luminance)
+    // Bottom half: dark muted ground (low luminance, warm/brownish)
+    // Center: warm skin/subject spot
+    let width = 64u32;
+    let height = 64u32;
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+
+    for y in 0..height {
+        let v = y as f32 / (height - 1) as f32;
+        for x in 0..width {
+            let u = x as f32 / (width - 1) as f32;
+
+            let color = if (u - 0.5).hypot(v - 0.5) < 0.15 {
+                // Center warm skin/subject
+                [0.85f32, 0.55, 0.45, 1.0]
+            } else if v < 0.45 {
+                // Cool bright sky
+                [0.45f32, 0.70, 0.95, 1.0]
+            } else {
+                // Dark ground
+                [0.10f32, 0.12, 0.06, 1.0]
+            };
+
+            pixels.push([
+                half::f16::from_f32(color[0]),
+                half::f16::from_f32(color[1]),
+                half::f16::from_f32(color[2]),
+                half::f16::from_f32(color[3]),
+            ]);
+        }
+    }
+
+    let img = LinearImage::new(width, height, Arc::new(pixels), ImageMetadata::default())
+        .expect("valid image");
+
+    assert_eq!(SmartMaskKind::ALL.len(), 7);
+
+    for &kind in SmartMaskKind::ALL {
+        let mask = LayerMask::from_smart_mask(kind, &img);
+        assert_eq!(mask.as_bytes().len(), 65536);
+        assert_ne!(kind.display_name(), "");
+
+        match kind {
+            SmartMaskKind::Sky => {
+                let sky_sample = mask.sample_bilinear(0.5, 0.15);
+                let ground_sample = mask.sample_bilinear(0.5, 0.85);
+                assert!(
+                    sky_sample > ground_sample,
+                    "Sky sample ({sky_sample}) should exceed ground sample ({ground_sample})"
+                );
+            }
+            SmartMaskKind::Highlights => {
+                let bright_sample = mask.sample_bilinear(0.5, 0.15);
+                let dark_sample = mask.sample_bilinear(0.1, 0.90);
+                assert!(
+                    bright_sample > dark_sample,
+                    "Highlight mask at bright region ({bright_sample}) should exceed dark region ({dark_sample})"
+                );
+            }
+            SmartMaskKind::Shadows => {
+                let dark_sample = mask.sample_bilinear(0.1, 0.90);
+                let bright_sample = mask.sample_bilinear(0.5, 0.15);
+                assert!(
+                    dark_sample > bright_sample,
+                    "Shadow mask at dark region ({dark_sample}) should exceed bright region ({bright_sample})"
+                );
+            }
+            SmartMaskKind::SubjectCenter => {
+                let center_sample = mask.sample_bilinear(0.5, 0.48);
+                let corner_sample = mask.sample_bilinear(0.05, 0.05);
+                assert!(
+                    center_sample > corner_sample,
+                    "SubjectCenter at center ({center_sample}) should exceed corner ({corner_sample})"
+                );
+            }
+            SmartMaskKind::Background => {
+                let center_sample = mask.sample_bilinear(0.5, 0.48);
+                let corner_sample = mask.sample_bilinear(0.05, 0.95);
+                assert!(
+                    corner_sample > center_sample,
+                    "Background at corner ({corner_sample}) should exceed center ({center_sample})"
+                );
+            }
+            SmartMaskKind::SkinTones => {
+                let skin_sample = mask.sample_bilinear(0.5, 0.5);
+                let cold_sky_sample = mask.sample_bilinear(0.1, 0.1);
+                assert!(
+                    skin_sample > cold_sky_sample,
+                    "Skin tone mask at center ({skin_sample}) should exceed blue sky ({cold_sky_sample})"
+                );
+            }
+            SmartMaskKind::Midtones => {
+                // Should produce smooth valid weights
+                let mid_sample = mask.sample_bilinear(0.5, 0.5);
+                assert!(mid_sample >= 0.0 && mid_sample <= 1.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_all_35_tools_and_full_stack_serde() {
+    assert_eq!(ToolId::ALL.len(), 35);
+    assert_eq!(ToolCategory::ALL.len(), 6);
+
+    let mut stack = EditStack::default();
+
+    for &tool in ToolId::ALL {
+        let op = EditOp::default_for_tool(tool);
+        assert_eq!(op.tool_id(), tool);
+
+        let disp_name = tool.display_name();
+        assert!(!disp_name.is_empty());
+        assert!(disp_name.is_ascii(), "Display name must be ASCII: {disp_name}");
+
+        let code = tool.short_code();
+        assert!(!code.is_empty());
+        assert!(code.is_ascii(), "Short code must be ASCII: {code}");
+
+        let category_name = tool.category();
+        assert_eq!(category_name, tool.tool_category().display_name());
+        assert!(ToolId::in_category(tool.tool_category()).contains(&tool));
+
+        // Slider params testing and roundtrip mutation
+        let sliders = op.slider_params();
+        for (i, (desc, _cur_val)) in sliders.iter().enumerate() {
+            assert!(desc.name.is_ascii(), "Param name must be ASCII: {}", desc.name);
+            assert!(desc.unit.is_ascii(), "Param unit must be ASCII: {}", desc.unit);
+            assert!(
+                desc.min <= desc.max,
+                "Slider min ({}) > max ({}) on {}",
+                desc.min,
+                desc.max,
+                desc.name
+            );
+
+            // Test setting the parameter
+            let mut mutated = op.clone();
+            let new_val = (desc.min + desc.max) * 0.5;
+            mutated.set_slider_param(i, new_val);
+            let updated_sliders = mutated.slider_params();
+            assert_eq!(updated_sliders.len(), sliders.len());
+        }
+
+        // Push to stack with a mask on some nodes
+        let id = if tool == ToolId::Vignette || tool == ToolId::Selective {
+            let mut custom_mask = LayerMask::empty();
+            custom_mask.paint_dab(0.5, 0.5, 0.25, 0.5, 1.0);
+            let node = EditNode::with_mask(op, custom_mask);
+            let nid = node.id;
+            stack.nodes.push(node);
+            nid
+        } else {
+            stack.push_op(op)
+        };
+
+        // Test EditStack helpers
+        assert!(stack.node_by_id(id).is_some());
+        assert!(stack.node_by_id_mut(id).is_some());
+        assert!(stack.set_node_opacity(id, 0.85));
+    }
+
+    assert_eq!(stack.nodes.len(), 35);
+
+    // Test setting mask via stack helper
+    let first_id = stack.nodes[0].id;
+    assert!(stack.set_node_mask(first_id, Some(LayerMask::full())));
+    assert!(stack.node_by_id(first_id).unwrap().mask.is_some());
+
+    // Serialize full 35-tool stack to JSON and deserialize back
+    let json = serde_json::to_string_pretty(&stack).expect("serialize full stack");
+    assert!(json.contains("RawDevelop"));
+    assert!(json.contains("TextOverlay"));
+
+    let deserialized: EditStack = serde_json::from_str(&json).expect("deserialize full stack");
+    assert_eq!(stack, deserialized);
+    assert_eq!(deserialized.nodes.len(), 35);
+}
+
+#[test]
+fn test_params_default_identity() {
+    // Verify that Default::default() is identity for non-converting filter types
+    assert!(RawDevelopParams::default().is_identity());
+    assert!(TuneParams::default().is_identity());
+    assert!(DetailsParams::default().is_identity());
+    assert!(CurvesParams::default().is_identity());
+    assert!(WhiteBalanceParams::default().is_identity());
+    assert!(ColorHslParams::default().is_identity());
+    assert!(Lut3dParams::default().is_identity());
+    assert!(ColorGradeParams::default().is_identity());
+    assert!(DehazeParams::default().is_identity());
+    assert!(TonalContrastParams::default().is_identity());
+    assert!(PerspectiveParams::default().is_identity());
+    assert!(ExpandParams::default().is_identity());
+    assert!(SelectiveParams::default().is_identity());
+    assert!(BrushParams::default().is_identity());
+    assert!(HealingParams::default().is_identity());
+    assert!(VignetteParams::default().is_identity());
+    assert!(HalationParams::default().is_identity());
+    assert!(BloomParams::default().is_identity());
+    assert!(GrainyFilmParams::default().is_identity());
+    assert!(HdrScapeParams::default().is_identity());
+    assert!(GlamourGlowParams::default().is_identity());
+    assert!(DramaParams::default().is_identity());
+    assert!(VintageParams::default().is_identity());
+    assert!(DoubleExposureParams::default().is_identity());
+    assert!(RetroluxParams::default().is_identity());
+    assert!(GrungeParams::default().is_identity());
+    assert!(LensBlurParams::default().is_identity());
+    assert!(MotionBlurParams::default().is_identity());
+    assert!(PortraitParams::default().is_identity());
+    assert!(HeadPoseParams::default().is_identity());
+    assert!(FramesParams::default().is_identity());
+    assert!(TextOverlayParams::default().is_identity());
+    assert!(CropRotateParams::default().is_identity());
+
+    // Creative B&W conversion filters always modify color data
+    assert!(!BwParams::default().is_identity());
+    assert!(!NoirParams::default().is_identity());
+}
