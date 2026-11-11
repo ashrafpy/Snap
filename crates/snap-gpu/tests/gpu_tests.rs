@@ -546,3 +546,125 @@ fn test_screen_pos_to_image_uv() {
     let narrow_uv = snap_gpu::GpuPipelineEngine::screen_pos_to_image_uv([10.0, 200.0], [0, 0, 800, 400], 400, 800, &params);
     assert!(narrow_uv.is_none(), "Far left click outside narrow image should be None");
 }
+
+#[test]
+fn test_details_pass1_pass2_isolation() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 32u32;
+    let h = 32u32;
+    let pixels = vec![[f16::from_f32(0.5); 4]; (w * h) as usize];
+    let src = LinearImage::new(w, h, pixels, ImageMetadata::default()).unwrap();
+
+    let mut stack = EditStack::default();
+    stack.push_op(EditOp::Details(DetailsParams {
+        structure: 40.0,
+        sharpening: 30.0,
+    }));
+
+    let out = gpu.export_full_res(&src, &stack, &[]).expect("Export Details");
+    assert_eq!(out.width, w);
+    assert_eq!(out.height, h);
+
+    // If Pass 1 uniform buffer was overwritten by Pass 2 before queue.submit,
+    // pass_idx was 1 during Pass 1, reading alpha=1.0 as luma_base and crushing mid-gray to 0.0 (pitch black).
+    for i in 0..out.pixels.len() {
+        let r = out.pixels[i][0].to_f32();
+        let g = out.pixels[i][1].to_f32();
+        let b = out.pixels[i][2].to_f32();
+        assert!(r > 0.45 && r < 0.55, "Details crushed pixel {} to black or invalid: R={}", i, r);
+        assert!(g > 0.45 && g < 0.55, "Details crushed pixel {} to black or invalid: G={}", i, g);
+        assert!(b > 0.45 && b < 0.55, "Details crushed pixel {} to black or invalid: B={}", i, b);
+    }
+}
+
+#[test]
+fn test_multi_layer_same_op_isolation() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 16u32;
+    let h = 16u32;
+    let pixels = vec![[f16::from_f32(0.2); 4]; (w * h) as usize];
+    let src = LinearImage::new(w, h, pixels, ImageMetadata::default()).unwrap();
+
+    let mut stack = EditStack::default();
+    // Two sequential TuneImage layers with different params
+    stack.push_op(EditOp::TuneImage(TuneParams {
+        brightness: 20.0,
+        ..Default::default()
+    }));
+    stack.push_op(EditOp::TuneImage(TuneParams {
+        brightness: 15.0,
+        ..Default::default()
+    }));
+
+    let out = gpu.export_full_res(&src, &stack, &[]).expect("Export Multi-layer TuneImage");
+    let p0_r = out.pixels[0][0].to_f32();
+    // 0.2 with two brightness boosts must be noticeably brighter than single boost
+    println!("Multi-layer TuneImage output R: {:.4}", p0_r);
+    assert!(p0_r > 0.25, "Multi-layer TuneImage failed to accumulate brightness: {}", p0_r);
+}
+
+#[test]
+fn test_hdr_curves_no_solarization() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 8u32;
+    let h = 8u32;
+    // Bright HDR highlight pixel (e.g. sun core at 3.0)
+    let pixels = vec![[f16::from_f32(3.0); 4]; (w * h) as usize];
+    let src = LinearImage::new(w, h, pixels, ImageMetadata::default()).unwrap();
+
+    // Default identity curve
+    let mut stack = EditStack::default();
+    let mut curve_params = CurvesParams::default();
+    // Add a tiny dummy node or ensure it evaluates non-identity so process_stack runs it
+    // Or set a control point: (0.5, 0.5) which preserves identity
+    curve_params.rgb.points = vec![
+        snap_core::curves::CurvePoint::new(0.0, 0.0),
+        snap_core::curves::CurvePoint::new(0.5, 0.52),
+        snap_core::curves::CurvePoint::new(1.0, 1.0),
+    ];
+    stack.push_op(EditOp::Curves(curve_params));
+
+    let out = gpu.export_full_res(&src, &stack, &[]).expect("Export HDR Curves");
+    let p0_r = out.pixels[0][0].to_f32();
+    let p0_g = out.pixels[0][1].to_f32();
+    let p0_b = out.pixels[0][2].to_f32();
+
+    println!("HDR Curves output: R={:.4}, G={:.4}, B={:.4}", p0_r, p0_g, p0_b);
+    // Before fix: clamped curve gave ratio = 1.0 / 1.6 = 0.625, turning 3.0 into a dark hole ~0.35!
+    // With fix: slope continuity preserves HDR headroom >= 2.9
+    assert!(p0_r > 2.8, "HDR highlight solarized or clipped by Curves: R={}", p0_r);
+    assert!(p0_g > 2.8, "HDR highlight solarized or clipped by Curves: G={}", p0_g);
+    assert!(p0_b > 2.8, "HDR highlight solarized or clipped by Curves: B={}", p0_b);
+}
+
+#[test]
+fn test_hdr_color_hsl_no_negative_saturation() {
+    let mut gpu = HeadlessGpu::new().expect("GPU init");
+    let w = 8u32;
+    let h = 8u32;
+    // HDR pixel with c_max + c_min > 2.0
+    let pixels = vec![[
+        f16::from_f32(2.5),
+        f16::from_f32(1.2),
+        f16::from_f32(0.9),
+        f16::from_f32(1.0),
+    ]; (w * h) as usize];
+    let src = LinearImage::new(w, h, pixels, ImageMetadata::default()).unwrap();
+
+    let mut stack = EditStack::default();
+    let mut hsl_params = ColorHslParams::default();
+    // Adjust hue of red band slightly so it's not identity
+    hsl_params.bands[0].hue = 5.0;
+    stack.push_op(EditOp::ColorHsl(hsl_params));
+
+    let out = gpu.export_full_res(&src, &stack, &[]).expect("Export HDR ColorHsl");
+    let p0_r = out.pixels[0][0].to_f32();
+    let p0_g = out.pixels[0][1].to_f32();
+    let p0_b = out.pixels[0][2].to_f32();
+
+    println!("HDR ColorHsl output: R={:.4}, G={:.4}, B={:.4}", p0_r, p0_g, p0_b);
+    // Before fix: c_max + c_min > 2.0 produced negative saturation and crushed / distorted colors
+    assert!(p0_r > 2.0, "HDR red channel distorted: {}", p0_r);
+    assert!(p0_g > 0.8, "HDR green channel distorted: {}", p0_g);
+    assert!(p0_b > 0.6, "HDR blue channel distorted: {}", p0_b);
+}

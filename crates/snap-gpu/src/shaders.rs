@@ -288,7 +288,7 @@ fn cs_tune_image(@builtin(global_invocation_id) gid: vec3<u32>) {
         lab.z *= sat;
     }
 
-    lab.x = clamp(L, 0.0, 2.0);
+    lab.x = max(L, 0.0);
     rgb = oklab_to_linear_rec2020(lab);
 
     let out_rgb = mix(in_px.rgb, rgb, u.opacity);
@@ -389,7 +389,9 @@ fn cs_color_hsl(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let srgb = max(REC2020_TO_SRGB * in_px.rgb, vec3<f32>(0.0));
     let srgb_gamma = linear_to_srgb(srgb);
-    var hsl = rgb_to_hsl(srgb_gamma);
+    let hdr_scale = max(1.0, max(srgb_gamma.r, max(srgb_gamma.g, srgb_gamma.b)));
+    let norm_gamma = srgb_gamma / hdr_scale;
+    var hsl = rgb_to_hsl(norm_gamma);
 
     let centers = array<f32, 8>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 280.0, 320.0);
     let widths  = array<f32, 8>(30.0, 25.0, 35.0, 45.0, 45.0, 35.0, 30.0, 30.0);
@@ -416,7 +418,8 @@ fn cs_color_hsl(@builtin(global_invocation_id) gid: vec3<u32>) {
     hsl.y = clamp(hsl.y * (1.0 + d_s), 0.0, 1.0);
     hsl.z = clamp(hsl.z * (1.0 + d_l * 0.3), 0.0, 1.0);
 
-    let out_gamma = hsl_to_rgb(hsl);
+    let out_gamma_norm = hsl_to_rgb(hsl);
+    let out_gamma = out_gamma_norm * hdr_scale;
     let out_lin_srgb = srgb_to_linear(out_gamma);
     let out_rec2020 = SRGB_TO_REC2020 * out_lin_srgb;
 
@@ -456,12 +459,13 @@ fn cs_curves(@builtin(global_invocation_id) gid: vec3<u32>) {
     let srgb = max(REC2020_TO_SRGB * in_px.rgb, vec3<f32>(0.0));
     let gamma_rgb = linear_to_srgb(srgb);
 
-    let r_curved = sample_curve(gamma_rgb.r).r;
-    let g_curved = sample_curve(gamma_rgb.g).g;
-    let b_curved = sample_curve(gamma_rgb.b).b;
+    let r_curved = sample_curve(clamp(gamma_rgb.r, 0.0, 1.0)).r + max(gamma_rgb.r - 1.0, 0.0);
+    let g_curved = sample_curve(clamp(gamma_rgb.g, 0.0, 1.0)).g + max(gamma_rgb.g - 1.0, 0.0);
+    let b_curved = sample_curve(clamp(gamma_rgb.b, 0.0, 1.0)).b + max(gamma_rgb.b - 1.0, 0.0);
 
     let y_val = 0.2126 * gamma_rgb.r + 0.7152 * gamma_rgb.g + 0.0722 * gamma_rgb.b;
-    let y_curved = sample_curve(y_val).a;
+    let y_clamped = clamp(y_val, 0.0, 1.0);
+    let y_curved = sample_curve(y_clamped).a + max(y_val - 1.0, 0.0);
 
     var ratio = 1.0;
     if (y_val > 1e-5) {

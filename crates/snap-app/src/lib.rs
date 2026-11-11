@@ -2,8 +2,10 @@ pub mod app;
 pub mod canvas_shader;
 pub mod curves_widget;
 pub mod histogram_widget;
+pub mod icons;
 pub mod sample_scene;
 pub mod theme;
+pub mod ui_preview;
 pub mod views;
 
 #[cfg(test)]

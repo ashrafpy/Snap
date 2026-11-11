@@ -3,6 +3,7 @@ use snap_core::curves::CurvesParams;
 use snap_core::image_types::{HistogramData, LinearImage, Lut3D};
 use snap_core::ops::{CropRotateParams, EditOp};
 use snap_core::stack::{EditNode, EditStack};
+use wgpu::util::DeviceExt;
 
 use crate::error::GpuError;
 use crate::lut_cache::GpuLutCache;
@@ -46,26 +47,10 @@ pub struct GpuPipelineEngine {
     view_temp: Option<wgpu::TextureView>,
     allocated_dims: (u32, u32),
 
-    // 1D Curve texture
-    curve_texture: wgpu::Texture,
-    curve_view: wgpu::TextureView,
-    curve_sampler: wgpu::Sampler,
-    current_curves: Option<CurvesParams>,
-
     // Samplers
     linear_clamp_sampler: wgpu::Sampler,
 
-    // Uniform buffers
-    raw_develop_buf: wgpu::Buffer,
-    white_balance_buf: wgpu::Buffer,
-    tune_image_buf: wgpu::Buffer,
-    color_hsl_buf: wgpu::Buffer,
-    curves_buf: wgpu::Buffer,
-    lut_3d_buf: wgpu::Buffer,
-    details_buf: wgpu::Buffer,
-    black_and_white_buf: wgpu::Buffer,
-    vignette_buf: wgpu::Buffer,
-    crop_transform_buf: wgpu::Buffer,
+    // Viewport uniform buffer
     viewport_buf: wgpu::Buffer,
 
     // Histogram buffers
@@ -124,77 +109,13 @@ impl GpuPipelineEngine {
             ..Default::default()
         });
 
-        // 1D Curve Texture (1024 x 1 Rgba16Float)
-        let curve_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("gpu_curve_1024_tex"),
-            size: wgpu::Extent3d {
-                width: 1024,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+        // Viewport uniform buffer
+        let viewport_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport_buf"),
+            size: std::mem::size_of::<ViewportUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let curve_view = curve_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let curve_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("gpu_curve_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // Initialize curve texture with identity
-        let id_curves = CurvesParams::default();
-        let baked = id_curves.bake_lut_1024();
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &curve_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&baked),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(1024 * 8),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1024,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        // Uniform buffers
-        let create_uniform_buf = |name: &str, size: u64| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(name),
-                size,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-
-        let raw_develop_buf = create_uniform_buf("raw_develop_buf", std::mem::size_of::<RawDevelopUniforms>() as u64);
-        let white_balance_buf = create_uniform_buf("white_balance_buf", std::mem::size_of::<WhiteBalanceUniforms>() as u64);
-        let tune_image_buf = create_uniform_buf("tune_image_buf", std::mem::size_of::<TuneImageUniforms>() as u64);
-        let color_hsl_buf = create_uniform_buf("color_hsl_buf", std::mem::size_of::<ColorHslUniforms>() as u64);
-        let curves_buf = create_uniform_buf("curves_buf", std::mem::size_of::<CurvesUniforms>() as u64);
-        let lut_3d_buf = create_uniform_buf("lut_3d_buf", std::mem::size_of::<Lut3dUniforms>() as u64);
-        let details_buf = create_uniform_buf("details_buf", std::mem::size_of::<DetailsUniforms>() as u64);
-        let black_and_white_buf = create_uniform_buf("black_and_white_buf", std::mem::size_of::<BlackAndWhiteUniforms>() as u64);
-        let vignette_buf = create_uniform_buf("vignette_buf", std::mem::size_of::<VignetteUniforms>() as u64);
-        let crop_transform_buf = create_uniform_buf("crop_transform_buf", std::mem::size_of::<CropTransformUniforms>() as u64);
-        let viewport_buf = create_uniform_buf("viewport_buf", std::mem::size_of::<ViewportUniforms>() as u64);
 
         // Histogram storage and staging buffer
         let hist_storage_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -520,21 +441,7 @@ impl GpuPipelineEngine {
             tex_temp: None,
             view_temp: None,
             allocated_dims: (0, 0),
-            curve_texture,
-            curve_view,
-            curve_sampler,
-            current_curves: None,
             linear_clamp_sampler,
-            raw_develop_buf,
-            white_balance_buf,
-            tune_image_buf,
-            color_hsl_buf,
-            curves_buf,
-            lut_3d_buf,
-            details_buf,
-            black_and_white_buf,
-            vignette_buf,
-            crop_transform_buf,
             viewport_buf,
             hist_storage_buf,
             hist_staging_buf,
@@ -717,19 +624,29 @@ impl GpuPipelineEngine {
         self.last_dirty_key = None;
     }
 
-    fn update_curves_texture(
-        curve_texture: &wgpu::Texture,
-        current_curves: &mut Option<CurvesParams>,
+    fn create_curve_texture(
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         curves: &CurvesParams,
-    ) {
-        if current_curves.as_ref() == Some(curves) {
-            return;
-        }
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let baked = curves.bake_lut_1024();
+        let curve_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gpu_curve_1024_tex"),
+            size: wgpu::Extent3d {
+                width: 1024,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: curve_texture,
+                texture: &curve_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -746,7 +663,8 @@ impl GpuPipelineEngine {
                 depth_or_array_layers: 1,
             },
         );
-        *current_curves = Some(curves.clone());
+        let curve_view = curve_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (curve_texture, curve_view)
     }
 
     /// Process the edit stack on the uploaded source image.
@@ -838,6 +756,9 @@ impl GpuPipelineEngine {
         let workgroups_x = (width + 15) / 16;
         let workgroups_y = (height + 15) / 16;
 
+        let mut retained_buffers = Vec::new();
+        let mut retained_textures = Vec::new();
+
         for node in &effective_nodes {
             let opacity = node.opacity.clamp(0.0, 1.0);
 
@@ -861,7 +782,11 @@ impl GpuPipelineEngine {
                         saturation: p.saturation,
                         opacity,
                     };
-                    queue.write_buffer(&self.raw_develop_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let raw_develop_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_raw_develop_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("raw_develop_bg"),
@@ -869,7 +794,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.raw_develop_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: raw_develop_buf.as_entire_binding() },
                         ],
                     });
 
@@ -880,6 +805,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.raw_develop_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(raw_develop_buf);
                 }
 
                 EditOp::WhiteBalance(p) => {
@@ -889,7 +816,11 @@ impl GpuPipelineEngine {
                         opacity,
                         _pad: 0.0,
                     };
-                    queue.write_buffer(&self.white_balance_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let white_balance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_white_balance_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("white_balance_bg"),
@@ -897,7 +828,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.white_balance_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: white_balance_buf.as_entire_binding() },
                         ],
                     });
 
@@ -908,6 +839,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.white_balance_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(white_balance_buf);
                 }
 
                 EditOp::TuneImage(p) => {
@@ -921,7 +854,11 @@ impl GpuPipelineEngine {
                         warmth: p.warmth,
                         opacity,
                     };
-                    queue.write_buffer(&self.tune_image_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let tune_image_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_tune_image_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("tune_image_bg"),
@@ -929,7 +866,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.tune_image_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: tune_image_buf.as_entire_binding() },
                         ],
                     });
 
@@ -940,6 +877,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.tune_image_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(tune_image_buf);
                 }
 
                 EditOp::ColorHsl(p) => {
@@ -956,7 +895,11 @@ impl GpuPipelineEngine {
                         _pad1: 0.0,
                         _pad2: 0.0,
                     };
-                    queue.write_buffer(&self.color_hsl_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let color_hsl_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_color_hsl_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("color_hsl_bg"),
@@ -964,7 +907,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.color_hsl_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: color_hsl_buf.as_entire_binding() },
                         ],
                     });
 
@@ -975,17 +918,23 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.color_hsl_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(color_hsl_buf);
                 }
 
                 EditOp::Curves(p) => {
-                    Self::update_curves_texture(&self.curve_texture, &mut self.current_curves, queue, p);
+                    let (curve_texture, curve_view) = Self::create_curve_texture(device, queue, p);
                     let uniforms = CurvesUniforms {
                         opacity,
                         _pad0: 0.0,
                         _pad1: 0.0,
                         _pad2: 0.0,
                     };
-                    queue.write_buffer(&self.curves_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let curves_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_curves_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("curves_bg"),
@@ -993,9 +942,9 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.curve_view) },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.curve_sampler) },
-                            wgpu::BindGroupEntry { binding: 4, resource: self.curves_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&curve_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.linear_clamp_sampler) },
+                            wgpu::BindGroupEntry { binding: 4, resource: curves_buf.as_entire_binding() },
                         ],
                     });
 
@@ -1006,6 +955,9 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.curves_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_textures.push(curve_texture);
+                    retained_buffers.push(curves_buf);
                 }
 
                 EditOp::Lut3d(p) => {
@@ -1028,7 +980,11 @@ impl GpuPipelineEngine {
                         _pad0: 0.0,
                         _pad1: 0.0,
                     };
-                    queue.write_buffer(&self.lut_3d_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let lut_3d_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_lut_3d_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("lut_3d_bg"),
@@ -1038,7 +994,7 @@ impl GpuPipelineEngine {
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&gpu_lut.view) },
                             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(self.lut_cache.sampler()) },
-                            wgpu::BindGroupEntry { binding: 4, resource: self.lut_3d_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: lut_3d_buf.as_entire_binding() },
                         ],
                     });
 
@@ -1049,6 +1005,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.lut_3d_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(lut_3d_buf);
                 }
 
                 EditOp::Details(p) => {
@@ -1064,7 +1022,11 @@ impl GpuPipelineEngine {
                         _pad0: 0.0,
                         _pad1: 0.0,
                     };
-                    queue.write_buffer(&self.details_buf, 0, bytemuck::bytes_of(&u_pass1));
+                    let details_buf_pass1 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_details_buf_pass1"),
+                        contents: bytemuck::bytes_of(&u_pass1),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("details_bg_pass1"),
@@ -1072,7 +1034,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.details_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: details_buf_pass1.as_entire_binding() },
                         ],
                     });
 
@@ -1097,7 +1059,11 @@ impl GpuPipelineEngine {
                         _pad0: 0.0,
                         _pad1: 0.0,
                     };
-                    queue.write_buffer(&self.details_buf, 0, bytemuck::bytes_of(&u_pass2));
+                    let details_buf_pass2 = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_details_buf_pass2"),
+                        contents: bytemuck::bytes_of(&u_pass2),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("details_bg_pass2"),
@@ -1105,7 +1071,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(self.view_temp.as_ref().unwrap()) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.details_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: details_buf_pass2.as_entire_binding() },
                         ],
                     });
 
@@ -1118,6 +1084,9 @@ impl GpuPipelineEngine {
                         cpass.set_bind_group(0, &bg2, &[]);
                         cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
                     }
+
+                    retained_buffers.push(details_buf_pass1);
+                    retained_buffers.push(details_buf_pass2);
                 }
 
                 EditOp::BlackAndWhite(p) => {
@@ -1129,7 +1098,11 @@ impl GpuPipelineEngine {
                         opacity,
                         _pad: 0.0,
                     };
-                    queue.write_buffer(&self.black_and_white_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let black_and_white_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_black_and_white_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("black_and_white_bg"),
@@ -1137,7 +1110,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.black_and_white_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: black_and_white_buf.as_entire_binding() },
                         ],
                     });
 
@@ -1148,6 +1121,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.black_and_white_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(black_and_white_buf);
                 }
 
                 EditOp::Vignette(p) => {
@@ -1160,7 +1135,11 @@ impl GpuPipelineEngine {
                         aspect: width as f32 / height as f32,
                         opacity,
                     };
-                    queue.write_buffer(&self.vignette_buf, 0, bytemuck::bytes_of(&uniforms));
+                    let vignette_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("gpu_vignette_buf"),
+                        contents: bytemuck::bytes_of(&uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
 
                     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("vignette_bg"),
@@ -1168,7 +1147,7 @@ impl GpuPipelineEngine {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: self.vignette_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: vignette_buf.as_entire_binding() },
                         ],
                     });
 
@@ -1179,6 +1158,8 @@ impl GpuPipelineEngine {
                     cpass.set_pipeline(&self.vignette_pipeline);
                     cpass.set_bind_group(0, &bg, &[]);
                     cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+
+                    retained_buffers.push(vignette_buf);
                 }
 
                 EditOp::CropRotate(_) => {
@@ -1196,6 +1177,8 @@ impl GpuPipelineEngine {
         }
 
         queue.submit(Some(encoder.finish()));
+        drop(retained_buffers);
+        drop(retained_textures);
 
         self.cached_output_is_source = first_pass;
         self.cached_output_in_a = in_a;
@@ -1594,7 +1577,11 @@ impl GpuPipelineEngine {
             flip_flags,
         };
 
-        queue.write_buffer(&self.crop_transform_buf, 0, bytemuck::bytes_of(&uniforms));
+        let crop_transform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gpu_crop_transform_buf"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("crop_transform_bg"),
@@ -1603,7 +1590,7 @@ impl GpuPipelineEngine {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_tex_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(dst_tex_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.linear_clamp_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: self.crop_transform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: crop_transform_buf.as_entire_binding() },
             ],
         });
 

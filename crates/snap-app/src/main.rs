@@ -24,6 +24,7 @@ Arguments:
 
 Options:
   --export-cli <IN> <OUT>      Headless GPU batch export (no GUI)
+  --capture-ui-previews <DIR>  Capture 7 studio UI preview PNGs to <DIR>
   --look <NAME>                Apply a named look preset during CLI export
   --lut <PATH>                 Apply a 3D LUT file during CLI export
   -h, --help                   Print help information
@@ -201,6 +202,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Check for --capture-ui-previews mode
+    if let Some(pos) = args.iter().position(|a| a == "--capture-ui-previews") {
+        if args.len() < pos + 2 {
+            eprintln!("Error: --capture-ui-previews requires <OUTPUT_DIR>");
+            std::process::exit(1);
+        }
+
+        let out_dir = PathBuf::from(&args[pos + 1]);
+        snap_app::ui_preview::capture_all_previews(&out_dir)?;
+        return Ok(());
+    }
+
     // Check for --export-cli mode
     if let Some(pos) = args.iter().position(|a| a == "--export-cli") {
         if args.len() < pos + 3 {
@@ -243,7 +256,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         views::view,
     )
     .title("Snap Photo Editor")
-    .window_size(Size::new(1366.0, 850.0))
+    .theme(|_app: &SnapApp| snap_app::theme::snap_theme())
+    .window_size(Size::new(1400.0, 880.0))
     .antialiasing(true)
     .subscription(subscription)
     .run()?;

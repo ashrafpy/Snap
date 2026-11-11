@@ -86,6 +86,7 @@ pub struct SnapApp {
     pub active_tool_session: Option<ActiveToolSession>,
     pub viewport_params: ViewportParams,
     pub bypass_edits: bool,
+    pub show_histogram: bool,
     pub histogram: Option<HistogramData>,
     pub hist_slot: Arc<Mutex<Option<HistogramData>>>,
     pub hist_dirty: bool,
@@ -104,6 +105,7 @@ pub struct SnapApp {
 pub enum Message {
     // File I/O
     OpenFileDialog,
+    OpenRecentFile(PathBuf),
     FileLoaded(Result<(PathBuf, LinearImage, Option<EditStack>), String>),
     LoadDemoScene,
     FileDropped(PathBuf),
@@ -112,6 +114,8 @@ pub enum Message {
 
     // Tabs & Navigation
     SelectTab(Tab),
+    ToggleSidebar,
+    ToggleHistogram,
 
     // Active Tool Session
     OpenTool(ToolId),
@@ -137,6 +141,7 @@ pub enum Message {
     SetPan([f32; 2]),
     FitView,
     Zoom100,
+    ZoomStep(f32),
     CanvasGestureEnd,
     CanvasClickEyedropper { norm_x: f32, norm_y: f32 },
     CanvasClickVignetteCenter { norm_x: f32, norm_y: f32 },
@@ -207,8 +212,13 @@ impl SnapApp {
             image_id: 1,
             document_history: HistoryManager::new(EditStack::default()),
             active_tool_session: None,
-            viewport_params: ViewportParams::default(),
+            viewport_params: {
+                let mut vp = ViewportParams::default();
+                vp.zoom = 0.90;
+                vp
+            },
             bypass_edits: false,
+            show_histogram: true,
             histogram: None,
             hist_slot: Arc::new(Mutex::new(None)),
             hist_dirty: false,
@@ -328,20 +338,31 @@ impl SnapApp {
                 return task;
             }
 
+            Message::OpenRecentFile(path) => {
+                let p = path.clone();
+                return Task::perform(
+                    async move { Self::load_image_and_sidecar(p).await },
+                    Message::FileLoaded,
+                );
+            }
+
             Message::FileLoaded(Ok((path, img, sidecar))) => {
                 self.current_image_path = Some(path.clone());
                 self.source_image = Some(Arc::new(img));
                 self.image_id = self.image_id.wrapping_add(1);
                 self.active_tool_session = None;
                 self.hist_dirty = true;
-                self.viewport_params = ViewportParams::default();
+                let mut vp = ViewportParams::default();
+                vp.zoom = 0.90;
+                self.viewport_params = vp;
 
                 // Add to recent files in config
-                if !self.config.recent_files.contains(&path) {
-                    self.config.recent_files.insert(0, path.clone());
-                    self.config.recent_files.truncate(10);
-                    let _ = self.config.save();
+                if let Some(pos) = self.config.recent_files.iter().position(|p| p == &path) {
+                    self.config.recent_files.remove(pos);
                 }
+                self.config.recent_files.insert(0, path.clone());
+                self.config.recent_files.truncate(10);
+                let _ = self.config.save();
 
                 // Load sidecar if present
                 if let Some(stack) = sidecar {
@@ -363,11 +384,13 @@ impl SnapApp {
                 let img = generate_sample_hdr_scene();
                 self.source_image = Some(Arc::new(img));
                 self.image_id = self.image_id.wrapping_add(1);
-                self.current_image_path = Some(PathBuf::from("Sample_HDR_Test_Scene.snap"));
+                self.current_image_path = None;
                 self.document_history = HistoryManager::new(EditStack::default());
                 self.active_tool_session = None;
                 self.hist_dirty = true;
-                self.viewport_params = ViewportParams::default();
+                let mut vp = ViewportParams::default();
+                vp.zoom = 0.90;
+                self.viewport_params = vp;
                 self.set_status("Loaded Sample HDR Test Scene (1600x1066 Linear Rec.2020)");
             }
 
@@ -418,6 +441,15 @@ impl SnapApp {
 
             Message::SelectTab(tab) => {
                 self.current_tab = tab;
+            }
+
+            Message::ToggleSidebar => {
+                self.config.show_sidebar = !self.config.show_sidebar;
+                let _ = self.config.save();
+            }
+
+            Message::ToggleHistogram => {
+                self.show_histogram = !self.show_histogram;
             }
 
             Message::OpenTool(tool) => {
@@ -565,15 +597,16 @@ impl SnapApp {
 
             Message::FitView => {
                 self.viewport_params.pan = [0.0, 0.0];
-                self.viewport_params.zoom = 1.0;
+                self.viewport_params.zoom = 0.90;
             }
 
             Message::Zoom100 => {
-                if let Some(ref img) = self.source_image {
-                    self.viewport_params.pan = [0.0, 0.0];
-                    // 1:1 pixel scaling
-                    self.viewport_params.zoom = (img.width as f32 / 1000.0).max(1.0);
-                }
+                self.viewport_params.pan = [0.0, 0.0];
+                self.viewport_params.zoom = 1.0;
+            }
+
+            Message::ZoomStep(factor) => {
+                self.viewport_params.zoom = (self.viewport_params.zoom * factor).clamp(0.08, 10.0);
             }
 
             Message::CanvasGestureEnd => {
@@ -847,7 +880,10 @@ impl SnapApp {
             Message::SetLutStrength(strength) => {
                 if let Some(ref mut session) = self.active_tool_session {
                     if let EditOp::Lut3d(p) = &mut session.live_op {
-                        p.strength = strength;
+                        p.strength = strength.clamp(0.0, 100.0);
+                    }
+                    if &session.live_op != session.history.current() {
+                        session.history.commit(session.live_op.clone());
                     }
                     self.hist_dirty = true;
                 }
