@@ -1,0 +1,25 @@
+[package]
+name = "snap-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "snap"
+path = "src/main.rs"
+
+[dependencies]
+snap-core.workspace = true
+snap-io.workspace = true
+snap-gpu.workspace = true
+iced.workspace = true
+wgpu.workspace = true
+tokio.workspace = true
+rfd.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true

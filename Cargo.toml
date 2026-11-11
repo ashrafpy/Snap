@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/snap-core",
+    "crates/snap-io",
+    "crates/snap-gpu",
+    "crates/snap-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Snap Contributors"]
+
+[workspace.dependencies]
+snap-core = { path = "crates/snap-core" }
+snap-io = { path = "crates/snap-io" }
+snap-gpu = { path = "crates/snap-gpu" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytemuck = { version = "1.20", features = ["derive"] }
+half = { version = "2.4", features = ["bytemuck", "serde"] }
+rayon = "1.10"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+dirs = "6.0"
+
+# Image, RAW, Color & Archive IO
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "bmp"] }
+zune-jpeg = "0.5"
+rawler = "0.7"
+moxcms = "0.9"
+kamadak-exif = "0.6"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+# GPU & Native Linux UI
+wgpu = "27.0"
+pollster = "0.4"
+iced = { version = "0.14", features = ["wgpu", "tokio", "canvas", "advanced", "image"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "fs"] }
+rfd = "0.17"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
