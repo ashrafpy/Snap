@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="apertureGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF5E62"/>
+      <stop offset="50%" stop-color="#FFD166"/>
+      <stop offset="100%" stop-color="#06D6A0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <!-- Background Squircle -->
+  <rect x="16" y="16" width="224" height="224" rx="48" ry="48" fill="#18191E" filter="url(#shadow)"/>
+  <!-- Aperture / Camera Leaf Emblem -->
+  <g transform="translate(128, 128)">
+    <circle r="72" fill="none" stroke="url(#apertureGrad)" stroke-width="12" stroke-linecap="round" opacity="0.9"/>
+    <path d="M 0 0 L 45 -25 L 30 25 L -10 45 L -40 10 Z" fill="none" stroke="url(#apertureGrad)" stroke-width="8" stroke-linejoin="round"/>
+    <circle cx="0" cy="0" r="24" fill="#18191E" stroke="url(#apertureGrad)" stroke-width="6"/>
+  </g>
+</svg>

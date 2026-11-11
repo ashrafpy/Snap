@@ -102,6 +102,7 @@ pub struct GpuPipelineEngine {
     last_dirty_key: Option<DirtyCacheKey>,
     cached_output_is_source: bool,
     cached_output_in_a: bool,
+    dirty_generation: u64,
 }
 
 impl GpuPipelineEngine {
@@ -560,6 +561,7 @@ impl GpuPipelineEngine {
             last_dirty_key: None,
             cached_output_is_source: true,
             cached_output_in_a: false,
+            dirty_generation: 0,
         }
     }
 
@@ -602,6 +604,11 @@ impl GpuPipelineEngine {
             multiview: None,
             cache: None,
         })
+    }
+
+    /// Dirty generation counter incremented whenever compute passes re-evaluate.
+    pub fn dirty_generation(&self) -> u64 {
+        self.dirty_generation
     }
 
     /// Upload a 3D LUT to the GPU cache.
@@ -806,6 +813,8 @@ impl GpuPipelineEngine {
         if self.last_dirty_key.as_ref() == Some(&current_key) {
             return self.get_current_output_view();
         }
+
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
 
         if effective_nodes.is_empty() {
             self.cached_output_is_source = true;
@@ -1324,12 +1333,12 @@ impl GpuPipelineEngine {
         params: &ViewportParams,
     ) {
         let (src_w, src_h) = self.source_dims;
-        if src_w == 0 || src_h == 0 {
+        if src_w == 0 || src_h == 0 || clip_bounds[2] == 0 || clip_bounds[3] == 0 {
             return;
         }
 
-        let vp_width = clip_bounds[2].max(1);
-        let vp_height = clip_bounds[3].max(1);
+        let vp_width = clip_bounds[2];
+        let vp_height = clip_bounds[3];
 
         // Ensure pipeline for target format exists
         if !self.viewport_pipelines.contains_key(&target_format) {

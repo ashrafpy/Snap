@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Snap
+GenericName=Photo Editor
+Comment=Fast GPU-accelerated non-destructive photo editor for Linux
+Exec=snap %f
+Icon=snap
+Terminal=false
+Categories=Graphics;Photography;2DGraphics;RasterGraphics;
+StartupWMClass=snap
+MimeType=image/jpeg;image/png;image/tiff;image/webp;image/bmp;image/x-adobe-dng;image/x-canon-cr2;image/x-canon-cr3;image/x-nikon-nef;image/x-sony-arw;image/x-fuji-raf;image/x-olympus-orf;image/x-panasonic-rw2;image/x-pentax-pef;

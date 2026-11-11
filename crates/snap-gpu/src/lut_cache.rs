@@ -55,6 +55,15 @@ impl GpuLutCache {
     }
 
     pub fn upload_lut(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, lut: &Lut3D) -> Result<(), GpuError> {
+        if self.luts.contains_key(&lut.id) {
+            return Ok(());
+        }
+        let gpu_lut = Self::create_gpu_lut(device, queue, lut)?;
+        self.luts.insert(lut.id.clone(), gpu_lut);
+        Ok(())
+    }
+
+    pub fn insert_or_replace_lut(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, lut: &Lut3D) -> Result<(), GpuError> {
         let gpu_lut = Self::create_gpu_lut(device, queue, lut)?;
         self.luts.insert(lut.id.clone(), gpu_lut);
         Ok(())
