@@ -275,7 +275,7 @@ impl ToolId {
     }
 }
 
-/// Metadata descriptor for a tool slider parameter (Snapseed gesture HUD).
+/// Metadata descriptor for a tool slider parameter (on-canvas gesture HUD).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamDescriptor {
     pub name: &'static str,
@@ -380,7 +380,7 @@ impl WhiteBalanceParams {
     }
 }
 
-/// Tune Image parameters (Snapseed core tone & color adjustments).
+/// Tune Image parameters (core tone & color adjustments).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct TuneParams {
     pub brightness: f32, // -100..=100
@@ -403,7 +403,7 @@ impl TuneParams {
             && self.warmth == 0.0
     }
 
-    /// Snapseed Magic Wand: Intelligent auto-enhancement from image histogram analysis.
+    /// Magic Wand: Intelligent auto-enhancement from image histogram analysis.
     pub fn auto_from_histogram(hist: &HistogramData) -> Self {
         let total_pixels: u64 = hist.luma.iter().map(|&c| c as u64).sum();
         if total_pixels == 0 {

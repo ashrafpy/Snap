@@ -154,7 +154,7 @@ impl EditStack {
     }
 
     /// Iterate over active (enabled) nodes up to an optional limit.
-    /// Powers Snapseed's "View Edits" step-by-step preview.
+    /// Powers the "View Edits" step-by-step preview.
     pub fn active_ops_up_to(&self, limit: Option<usize>) -> impl Iterator<Item = &EditNode> {
         let count = limit.unwrap_or(self.nodes.len());
         self.nodes.iter().take(count).filter(|n| n.enabled)
@@ -239,5 +239,5 @@ impl<T: Clone> HistoryManager<T> {
     }
 }
 
-/// Snapseed 4.1 in-tool interactive session history for gestures and sliders.
+/// In-tool interactive session history for gestures and sliders.
 pub type ToolSessionHistory = HistoryManager<EditOp>;

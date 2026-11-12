@@ -1753,7 +1753,7 @@ pub fn view_layer_mask_inspector<'a>(
         .size(14)
         .on_toggle(ToolEditorEvent::MaskToggleRedOverlay);
 
-    // Quick Snapseed Brush Opacity step pills: 0%, 25%, 50%, 75%, 100%
+    // Quick Brush Opacity step pills: 0%, 25%, 50%, 75%, 100%
     let opacity_steps = [
         (0.0_f32, "0%"),
         (0.25_f32, "25%"),

@@ -264,7 +264,7 @@ fn cs_tune_image(@builtin(global_invocation_id) gid: vec3<u32>) {
         L += (u.highlights / 100.0) * 0.25 * smoothstep(0.4, 1.0, L);
     }
 
-    // Ambiance (Snapseed fill/balance)
+    // Ambiance (tonal fill/balance)
     if (u.ambiance != 0.0) {
         let amb = u.ambiance / 100.0;
         L += amb * 0.15 * sin(3.14159265 * clamp(L, 0.0, 1.0));

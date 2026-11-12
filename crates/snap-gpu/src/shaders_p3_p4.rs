@@ -2090,7 +2090,7 @@ fn cs_text_overlay(@builtin(global_invocation_id) gid: vec3<u32>) {
         let after_bg = mix(in_px.rgb, u.bg_rgb.rgb, bg_alpha);
         out_rgb = mix(after_bg, u.fg_rgb.rgb, fg_alpha);
     } else {
-        // Snapseed Knockout mode: photo shines through text glyphs while background plate/canvas is tinted/dimmed
+        // Knockout mode: photo shines through text glyphs while background plate/canvas is tinted/dimmed
         let dimmed_photo = in_px.rgb * 0.22 + u.bg_rgb.rgb * 0.18;
         let plate_rgb = mix(dimmed_photo, u.bg_rgb.rgb, bg_alpha);
         out_rgb = mix(plate_rgb, in_px.rgb, fg_alpha);

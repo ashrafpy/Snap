@@ -18,7 +18,7 @@ pub struct LookPreset {
     pub stack: EditStack,
 }
 
-/// Retrieve all 11 classic built-in Snapseed Looks.
+/// Retrieve all 11 built-in Looks.
 pub fn built_in_looks() -> Vec<LookPreset> {
     vec![
         // 1. Portrait

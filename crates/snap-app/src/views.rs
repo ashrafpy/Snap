@@ -1808,7 +1808,7 @@ fn render_4tab_inspector<'a>(app: &'a SnapApp) -> Element<'a, Message> {
 }
 
 // ---------------------------------------------------------------------------
-// Tab: Tools (Snapseed 2-Column Grid)
+// Tab: Tools (2-Column Grid)
 // ---------------------------------------------------------------------------
 
 fn render_tools_tab<'a>(app: &'a SnapApp) -> Element<'a, Message> {

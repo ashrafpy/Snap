@@ -1,18 +1,18 @@
 # Snap — Product Specification & System Architecture (`product_spec.md`)
 
-**Snap** is a fast, color-accurate, non-destructive native Linux photo editing and retouching studio inspired by **Snapseed v4.2.1** (`4.2.1.1014141696`), built with **Rust (2024 edition)**, **`iced 0.14.0`** (Wayland/X11 GUI), and **`wgpu 27.0.1`** (Vulkan compute & shader pipeline).
+**Snap** is a fast, color-accurate, non-destructive native Linux photo editing and retouching studio inspired by Snapseed, built with **Rust (2024 edition)**, **`iced 0.14.0`** (Wayland/X11 GUI), and **`wgpu 27.0.1`** (Vulkan compute & shader pipeline).
 
-It combines Snapseed's zero-friction dual-axis canvas gesture workflow, Quick Looks, and 3D LUT / XMP preset import with a scene-referred 16/32-bit floating-point Linear Rec.2020 GPU pipeline, Oklab/Oklch perceptual color math, RAW support, and parametric edit stacks.
+It combines a zero-friction dual-axis canvas gesture workflow, Quick Looks, and 3D LUT / XMP preset import with a scene-referred 16/32-bit floating-point Linear Rec.2020 GPU pipeline, Oklab/Oklch perceptual color math, RAW support, and parametric edit stacks.
 
 ---
 
 ## 1. Product Scope & Status Summary
 
-- **Target Platform**: Native Linux desktop (Wayland & X11) + Headless Vulkan CLI. Non-goal: Mobile camera viewfinder (*Snapseed Camera*).
+- **Target Platform**: Native Linux desktop (Wayland & X11) + Headless Vulkan CLI.
 - **Current Milestone Status (Phases 1–4 Complete)**:
-  - **Phase 1 — Core MVP + Snapseed 4.2 LUT & Color Engine**: `snap-core`, `snap-io`, `snap-gpu`, `snap-app`, single-image CLI export, and `.desktop` packaging.
+  - **Phase 1 — Core MVP + LUT & Color Engine**: `snap-core`, `snap-io`, `snap-gpu`, `snap-app`, single-image CLI export, and `.desktop` packaging.
   - **Darkroom Studio UI Overhaul**: Custom palette (`theme.rs`), 69-icon pure `iced::widget::canvas` vector engine (`icons.rs`), `stack!` HUD overlays, darkroom histogram & spline curves widgets, and offscreen Vulkan UI screenshot harness (`--capture-ui-previews <DIR>`).
-  - **Phases 2–4 — 100% Snapseed 4.2.1 Feature Parity**: All **35 `ToolId`s** covering all **36 Snapseed 4.2.1 tools**, per-layer `LayerMask` brush & 7 one-tap `SmartMaskKind`s in `View Edits`, Adobe Lightroom / ACR `.xmp` preset importer (`snap-io::xmp`), interactive viewport overlays (`canvas_overlays.rs`), pure-vector typography rasterizer (`text_raster.rs`), and headless GPU folder batch export (`--batch-dir`).
+  - **Phases 2–4 — Complete Creative & Retouching Suite**: All **35 `ToolId`s**, per-layer `LayerMask` brush & 7 one-tap `SmartMaskKind`s in `View Edits`, Adobe Lightroom / ACR `.xmp` preset importer (`snap-io::xmp`), interactive viewport overlays (`canvas_overlays.rs`), pure-vector typography rasterizer (`text_raster.rs`), and headless GPU folder batch export (`--batch-dir`).
 - **Verification Baseline**: `64 / 64` workspace unit + live Vulkan GPU tests passing (`cargo test --workspace --offline`), `0` compiler warnings, `12 / 12` offscreen Vulkan `1440x900` UI previews verified.
 
 ---
@@ -32,7 +32,7 @@ flowchart LR
 
     subgraph CORE["snap-core (Domain Model, Masks & Edit Stack)"]
         STACK["Non-Destructive EditStack + Per-Node LayerMask + Undo/Redo"]
-        OPS["35 Snapseed 4.2.1 EditOps + Unified Slider/Preset Dispatch"]
+        OPS["35 Parametric EditOps + Unified Slider/Preset Dispatch"]
         SPLINE["Fritsch-Carlson Monotonic Cubic Spline 1D LUT Generator"]
         SMART["Smart Mask Generators (Sky, Subject, Luma Zones, Skin)"]
     end
@@ -47,7 +47,7 @@ flowchart LR
 
     subgraph UI["snap-app (iced 0.14.0 Native Wayland/X11 Darkroom Studio)"]
         CANVAS["Shader Viewport + Interactive Overlays (Crop, U-Point, Brush, Blur)"]
-        HUD["Dual-Axis Snapseed Gesture HUD + Favorites Quick-Bar"]
+        HUD["Dual-Axis Canvas Gesture HUD + Favorites Quick-Bar"]
         INSPECTOR["Categorized 2-Col Tool Grid + Custom Wheels/Curves/HSL/Mask Editors"]
         PREVIEW["Headless Vulkan UI Screenshot Harness (--capture-ui-previews)"]
     end
@@ -70,32 +70,30 @@ flowchart LR
 ## 3. LUTs, Presets, Workspace & Non-Destructive Workflow Spec
 
 ### 3.1 LUTs, Looks & Preset Engine
-| Feature | Snapseed 4.2.1 Capabilities | Status | `Snap` Implementation & Linux Upgrades |
+| Feature | Capabilities | Status | Implementation Details |
 | :--- | :--- | :---: | :--- |
-| **3D LUT Import & Tool** | Import `.cube`, `.3dl`, and `.png` (HaldCLUT) via *Manage Looks* or *LUT* tool; `0–100%` Strength slider; non-destructive stack layer | `[x]` Done | Hardware trilinear `wgpu::TextureDimension::D3` (`Rgba16Float`), supports arbitrary cube sizes (`17^3`, `33^3`, `65^3`), HaldCLUT `.png`, `.3dl`, `.cube`, `.zip` packs, plus **Input Color Space selector** (*sRGB, Rec.709, Apple/Sony/Canon Log*) |
-| **Sidecar & LUT Pack Import** | `.snapseed` stack recipes, `.zip` bundles | `[x]` Done | `.snap` JSON non-destructive sidecar + `.zip` LUT bundle extraction into `~/.local/share/snap/luts/` |
+| **3D LUT Import & Tool** | Import `.cube`, `.3dl`, and `.png` (HaldCLUT); `0–100%` Strength slider; non-destructive stack layer | `[x]` Done | Hardware trilinear `wgpu::TextureDimension::D3` (`Rgba16Float`), supports arbitrary cube sizes (`17^3`, `33^3`, `65^3`), HaldCLUT `.png`, `.3dl`, `.cube`, `.zip` packs, plus **Input Color Space selector** (*sRGB, Rec.709, Apple/Sony/Canon Log*) |
+| **Sidecar & LUT Pack Import** | Non-destructive stack recipes and `.zip` LUT bundles | `[x]` Done | `.snap` JSON non-destructive sidecar + `.zip` LUT bundle extraction into `~/.local/share/snap/luts/` |
 | **Adobe `.xmp` Preset Import** | `.xmp` (Lightroom / Camera Raw develop profiles) | `[x]` Done | `snap-io::xmp` parametric importer mapping Exposure, Contrast, Highlights/Shadows, WB, Clarity, 8-band HSL, Vignette, B&W, and Tone Curves into `LookPreset` |
-| **Built-in & Custom "My Looks"** | 11 built-in Looks (*Portrait, Smooth, Pop, Accentuate, Faded Glow, Morning, Bright, Fine Art, Push, Structure, Silhouette*) + save any Edit Stack as a reusable Look | `[x]` Done | Stored cleanly in `~/.local/share/snap/looks/` with 1-click apply in the `Looks` tab |
+| **Built-in & Custom Looks** | 11 built-in Looks (*Portrait, Smooth, Pop, Accentuate, Faded Glow, Morning, Bright, Fine Art, Push, Structure, Silhouette*) + save any Edit Stack as a reusable Look | `[x]` Done | Stored cleanly in `~/.local/share/snap/looks/` with 1-click apply in the `Looks` tab |
 | **Copy / Paste & Batch Recipes** | Copy edit stack from one photo and paste onto others / batch apply | `[x]` Done | `Copy` / `Paste` stack recipe + single-image `--export-cli` + `--batch-dir <IN> <OUT> [--look\|--lut\|--xmp]` GPU folder batch export |
 
 ### 3.2 Workspace, Navigation & Stack Capabilities
-| Feature | Snapseed 4.2.1 Capabilities | Status | `Snap` Implementation |
+| Feature | Capabilities | Status | Implementation Details |
 | :--- | :--- | :---: | :--- |
 | **Dual-Axis Canvas Gesture** | Vertical drag = pick parameter HUD; Horizontal drag = adjust `-100..+100` | `[x]` Done | True `stack!` glass HUD overlays + right-sidebar studio sliders |
-| **Hold to Compare** | Long-press photo for instant original preview | `[x]` Done | `Spacebar` hold + top-bar `Compare` toggle |
+| **Hold to Compare** | Instant original image bypass preview | `[x]` Done | `Spacebar` hold + top-bar `Compare` toggle |
 | **Customizable Favorites Bar** | Pin favorite tools (e.g., *Tune, LUT, Curves, Selective, Healing*) to top quick-access dock | `[x]` Done | Amber star pin on any tool card -> top Favorites Quick-Bar persisted in `~/.config/snap/config.json` |
-| **In-Tool Undo / Redo (4.1)** | Granular per-slider/node undo & redo inside an active tool session before committing to stack | `[x]` Done | `ToolSessionHistory` + global 100-step `HistoryManager<EditStack>` |
+| **In-Tool Undo / Redo** | Granular per-slider/node undo & redo inside an active tool session before committing to stack | `[x]` Done | `ToolSessionHistory` + global 100-step `HistoryManager<EditStack>` |
 | **View Edits (History Stack)** | Inspect every applied step; toggle, delete, opacity-blend, or re-open & tweak earlier parameters | `[x]` Done | `View Edits` inspector with enable eye, opacity slider, edit, and delete |
 | **Per-Layer Mask Brush** | Paint any edit step in/out (`0%, 25%, 50%, 75%, 100%`), invert mask, translucent red overlay | `[x]` Done | `256x256` feathered `LayerMask` per `EditNode` + GPU `MASK_BLEND_WGSL` + ruby-red canvas mask preview |
-| **Smart Masking (4.0)** | One-tap subject / sky / background isolation inside Edit Stack | `[x]` Done | 1-tap *Sky, Subject, Background, Highlights, Midtones, Shadows, Skin Tones* generators (`SmartMaskKind`) |
+| **Smart Masking** | One-tap subject / sky / background isolation inside Edit Stack | `[x]` Done | 1-tap *Sky, Subject, Background, Highlights, Midtones, Shadows, Skin Tones* generators (`SmartMaskKind`) |
 | **Live Histogram & Zoom Controls** | Real-time RGB/Luminance histogram + zoom/pan (`Fit`, `100%`, wheel zoom, middle-drag pan) | `[x]` Done | 256-bin atomic GPU histogram + darkroom instrument curve widget + `0.90` gallery mat fit |
-| **Export & Sizing** | Save sidecar, Export JPG (`100%/95%/80%`), PNG, resize (`Original`, `4000px`..`800px`), preserve EXIF & ICC | `[x]` Done | Full-res GPU export to JPG, 8/16-bit PNG, and 16-bit TIFF with Lanczos3 resize |
+| **Export & Sizing** | Save sidecar, Export JPG (`100%/95%/80%`), PNG, TIFF, resize (`Original`, `4000px`..`800px`), preserve EXIF & ICC | `[x]` Done | Full-res GPU export to JPG, 8/16-bit PNG, and 16-bit TIFF with Lanczos3 resize |
 
 ---
 
-## 4. Complete 36-Tool Parity Matrix (`ToolId` Specification)
-
-*(Note: Snapseed's Crop #10 and Rotate/Straighten #11 share unified interactive geometry in `ToolId::CropRotate`, yielding 35 `ToolId` enum variants covering all 36 Snapseed 4.2.1 tools.)*
+## 4. Complete 35-Tool Specification Matrix (`ToolId`)
 
 ### A. RAW & Core Tonal / Color Tools
 | # | Tool (`ToolId`) | Sub-Parameters, Controls & GPU Algorithm | Status |
@@ -114,43 +112,43 @@ flowchart LR
 ### B. Geometry & Canvas Tools
 | # | Tool (`ToolId`) | Sub-Parameters, Controls & GPU Algorithm | Status |
 | :- | :--- | :--- | :---: |
-| 11–12 | **Crop & Rotate** (`CropRotate`) | Aspect presets (*Free, Original, 1:1, DIN, 3:2, 4:3, 5:4, 7:5, 16:9*), Straighten (`-45..+45 deg`) with auto-inscribed bounds, 90 deg CW/CCW, Flip H/V | `[x]` Done |
-| 13 | **Perspective** (`Perspective`) | Vertical/Horizontal Keystone (`-100..+100`), Rotate (`-45..+45`), Scale (`50..200%`), EdgeFill (*Black, White, SmartMirror*) via 3x3 inverse homography | `[x]` Done |
-| 14 | **Expand** (`Expand`) | Top/Bottom/Left/Right outward margin (`0..25%`), `ExpandFillMode` (*Black, White, SmartEdge* mirrored patch synthesis) | `[x]` Done |
+| 11 | **Crop & Rotate** (`CropRotate`) | Aspect presets (*Free, Original, 1:1, DIN, 3:2, 4:3, 5:4, 7:5, 16:9*), Straighten (`-45..+45 deg`) with auto-inscribed bounds, 90 deg CW/CCW, Flip H/V | `[x]` Done |
+| 12 | **Perspective** (`Perspective`) | Vertical/Horizontal Keystone (`-100..+100`), Rotate (`-45..+45`), Scale (`50..200%`), EdgeFill (*Black, White, SmartMirror*) via 3x3 inverse homography | `[x]` Done |
+| 13 | **Expand** (`Expand`) | Top/Bottom/Left/Right outward margin (`0..25%`), `ExpandFillMode` (*Black, White, SmartEdge* mirrored patch synthesis) | `[x]` Done |
 
 ### C. Local Adjustments & Retouching
 | # | Tool (`ToolId`) | Sub-Parameters, Controls & GPU Algorithm | Status |
 | :- | :--- | :--- | :---: |
-| 15 | **Selective (U-Point)** (`Selective`) | Up to 16 Nik U-Point control pins (`x, y, radius, brightness, contrast, saturation, structure`) weighted by GPU Oklab $\Delta E$ color similarity x smooth radial falloff | `[x]` Done |
-| 16 | **Brush** (`Brush`) | `BrushChannel` (*Dodge & Burn, Exposure, Temperature, Saturation*), Step (`-1.0..+1.0`), Radius, Feather -> `256x256` signed `R32Float` map texture | `[x]` Done |
-| 17 | **Healing** (`Healing`) | `Vec<HealStroke>` (`x, y, radius, source_offset_opt`) -> multi-directional neighborhood patch synthesis & boundary feathering | `[x]` Done |
+| 14 | **Selective (U-Point)** (`Selective`) | Up to 16 control pins (`x, y, radius, brightness, contrast, saturation, structure`) weighted by GPU Oklab $\Delta E$ color similarity x smooth radial falloff | `[x]` Done |
+| 15 | **Brush** (`Brush`) | `BrushChannel` (*Dodge & Burn, Exposure, Temperature, Saturation*), Step (`-1.0..+1.0`), Radius, Feather -> `256x256` signed `R32Float` map texture | `[x]` Done |
+| 16 | **Healing** (`Healing`) | `Vec<HealStroke>` (`x, y, radius, source_offset_opt`) -> multi-directional neighborhood patch synthesis & boundary feathering | `[x]` Done |
 
 ### D. Cinematic, Analog, Blur & Creative Tools
 | # | Tool (`ToolId`) | Sub-Parameters, Controls & GPU Algorithm | Status |
 | :- | :--- | :--- | :---: |
-| 18 | **Black & White** (`BlackAndWhite`) | 6 optical filters (*Neutral, Red, Orange, Yellow, Green, Blue*), Brightness, Contrast, Grain | `[x]` Done |
-| 19 | **Vignette** (`Vignette`) | Draggable center (`x, y`), Outer & Inner Brightness, Radius | `[x]` Done |
-| 20 | **Halation** (`Halation`) | 2-pass separable highlight scatter into red/orange emulsion layer: Threshold (`0..100`), Strength (`0..100`), Spread (`0..100`) | `[x]` Done |
-| 21 | **Bloom** (`Bloom`) | 2-pass Pro-Mist soft highlight diffusion: Strength (`0..100`), Size (`0..100`), HighlightRange (`0..100`) | `[x]` Done |
-| 22 | **Grainy Film** (`GrainyFilm`) | 8 analog film stocks (*K100, K400, F200, Velvia50, Cinestill800T, IlfordHP5, CrossProcess, Polaroid*), organic Halide Grain (`0..100`), StyleStrength (`0..100`) | `[x]` Done |
-| 23 | **Noir** (`Noir`) | 4 silver-gelatin presets (*Dark, Light, Film, Harsh*), Brightness, Contrast, Wash (matte lifted blacks `0..100`), Grain (`0..100`) | `[x]` Done |
-| 24 | **HDR Scape** (`HdrScape`) | 4 presets (*Nature, People, Fine, Strong*), FilterStrength (`0..100`), Brightness, Saturation via edge-preserving log-luminance compression | `[x]` Done |
-| 25 | **Glamour Glow** (`GlamourGlow`) | Styles 1–5, Glow (`0..100`), Saturation (`-100..+100`), Warmth (`-100..+100`) via soft-light Gaussian blend | `[x]` Done |
-| 26 | **Drama** (`Drama`) | 6 presets (*Drama 1/2, Bright 1/2, Dark 1/2*), FilterStrength (`0..100`), Saturation (`-100..+100`) | `[x]` Done |
-| 27 | **Vintage** (`Vintage`) | 12 color split-tone styles (`0..11`), Brightness, Saturation, StyleStrength, VignetteStrength, CenterSize | `[x]` Done |
-| 28 | **Lens Blur** (`LensBlur`) | `Elliptical` / `Linear` tilt-shift (`center_x, center_y, inner_radius, transition, angle_deg`), BlurStrength (`0..100`), **BokehBoost** (`0..100` 32-tap Vogel-disk specular blooming), VignetteStrength | `[x]` Done |
-| 29 | **Motion Blur** (`MotionBlur`) | `FullScene` / `RadialPan` 24-tap directional line-integral blur, Angle (`0..360 deg`), Strength (`0..100`), Center (`x, y`) | `[x]` Done |
-| 30 | **Double Exposure** (`DoubleExposure`) | Secondary image path/buffer + 6 blend modes (*Default, Lighten, Darken, Add, Subtract, Blend*) + Opacity (`0..100`) | `[x]` Done |
-| 31 | **Retrolux** (`Retrolux`) | Styles `0..12`, Brightness, Saturation, Contrast, StyleStrength, Scratches (`0..100`), LightLeaks (`0..100`), deterministic Seed + Shuffle | `[x]` Done |
-| 32 | **Grunge** (`Grunge`) | Styles `0..4`, Brightness, Contrast, Saturation, TextureStrength (`0..100`), deterministic Seed + Shuffle (procedural FBM grunge overlay) | `[x]` Done |
+| 17 | **Black & White** (`BlackAndWhite`) | 6 optical filters (*Neutral, Red, Orange, Yellow, Green, Blue*), Brightness, Contrast, Grain | `[x]` Done |
+| 18 | **Vignette** (`Vignette`) | Draggable center (`x, y`), Outer & Inner Brightness, Radius | `[x]` Done |
+| 19 | **Halation** (`Halation`) | 2-pass separable highlight scatter into red/orange emulsion layer: Threshold (`0..100`), Strength (`0..100`), Spread (`0..100`) | `[x]` Done |
+| 20 | **Bloom** (`Bloom`) | 2-pass Pro-Mist soft highlight diffusion: Strength (`0..100`), Size (`0..100`), HighlightRange (`0..100`) | `[x]` Done |
+| 21 | **Grainy Film** (`GrainyFilm`) | 8 analog film stocks (*K100, K400, F200, Velvia50, Cinestill800T, IlfordHP5, CrossProcess, Polaroid*), organic Halide Grain (`0..100`), StyleStrength (`0..100`) | `[x]` Done |
+| 22 | **Noir** (`Noir`) | 4 silver-gelatin presets (*Dark, Light, Film, Harsh*), Brightness, Contrast, Wash (matte lifted blacks `0..100`), Grain (`0..100`) | `[x]` Done |
+| 23 | **HDR Scape** (`HdrScape`) | 4 presets (*Nature, People, Fine, Strong*), FilterStrength (`0..100`), Brightness, Saturation via edge-preserving log-luminance compression | `[x]` Done |
+| 24 | **Glamour Glow** (`GlamourGlow`) | Styles 1–5, Glow (`0..100`), Saturation (`-100..+100`), Warmth (`-100..+100`) via soft-light Gaussian blend | `[x]` Done |
+| 25 | **Drama** (`Drama`) | 6 presets (*Drama 1/2, Bright 1/2, Dark 1/2*), FilterStrength (`0..100`), Saturation (`-100..+100`) | `[x]` Done |
+| 26 | **Vintage** (`Vintage`) | 12 color split-tone styles (`0..11`), Brightness, Saturation, StyleStrength, VignetteStrength, CenterSize | `[x]` Done |
+| 27 | **Lens Blur** (`LensBlur`) | `Elliptical` / `Linear` tilt-shift (`center_x, center_y, inner_radius, transition, angle_deg`), BlurStrength (`0..100`), **BokehBoost** (`0..100` 32-tap Vogel-disk specular blooming), VignetteStrength | `[x]` Done |
+| 28 | **Motion Blur** (`MotionBlur`) | `FullScene` / `RadialPan` 24-tap directional line-integral blur, Angle (`0..360 deg`), Strength (`0..100`), Center (`x, y`) | `[x]` Done |
+| 29 | **Double Exposure** (`DoubleExposure`) | Secondary image path/buffer + 6 blend modes (*Default, Lighten, Darken, Add, Subtract, Blend*) + Opacity (`0..100`) | `[x]` Done |
+| 30 | **Retrolux** (`Retrolux`) | Styles `0..12`, Brightness, Saturation, Contrast, StyleStrength, Scratches (`0..100`), LightLeaks (`0..100`), deterministic Seed + Shuffle | `[x]` Done |
+| 31 | **Grunge** (`Grunge`) | Styles `0..4`, Brightness, Contrast, Saturation, TextureStrength (`0..100`), deterministic Seed + Shuffle (procedural FBM grunge overlay) | `[x]` Done |
 
 ### E. Portrait & Finishing Tools
 | # | Tool (`ToolId`) | Sub-Parameters, Controls & GPU Algorithm | Status |
 | :- | :--- | :--- | :---: |
-| 33 | **Portrait** (`Portrait`) | FaceCenter (`x, y`), FaceRadius, FaceSpotlight (`0..100`), SkinSmoothing (`0..100` Oklch skin-hue bilateral frequency separation), EyeClarity (`0..100`), SkinTone preset | `[x]` Done |
-| 34 | **Head Pose** (`HeadPose`) | FaceCenter (`x, y`), YawX (`-100..+100`), PitchY (`-100..+100`), Smile (`-100..+100`), FocalLength (`-100..+100`) via smooth 2.5D radial/perspective warp | `[x]` Done |
-| 35 | **Frames** (`Frames`) | 8 styles (*CleanWhite, MatteBlack, Polaroid, Film35mm, InstantDate, GalleryLine, RoughEdge, Letterbox*), Width (`0..100`), InnerLine (`bool`), AspectPad | `[x]` Done |
-| 36 | **Text** (`TextOverlay`) | Text string + Subtext, 8 scalable vector typography/badge styles (*ModernBold, EditorialSerif, MinimalBox, StampFrame, CinemaSub, RetroBadge, VerticalTag, Signature*), Center (`x, y`), Scale, Opacity, InvertMask (knockout), ColorPreset | `[x]` Done |
+| 32 | **Portrait** (`Portrait`) | FaceCenter (`x, y`), FaceRadius, FaceSpotlight (`0..100`), SkinSmoothing (`0..100` Oklch skin-hue bilateral frequency separation), EyeClarity (`0..100`), SkinTone preset | `[x]` Done |
+| 33 | **Head Pose** (`HeadPose`) | FaceCenter (`x, y`), YawX (`-100..+100`), PitchY (`-100..+100`), Smile (`-100..+100`), FocalLength (`-100..+100`) via smooth 2.5D radial/perspective warp | `[x]` Done |
+| 34 | **Frames** (`Frames`) | 8 styles (*CleanWhite, MatteBlack, Polaroid, Film35mm, InstantDate, GalleryLine, RoughEdge, Letterbox*), Width (`0..100`), InnerLine (`bool`), AspectPad | `[x]` Done |
+| 35 | **Text** (`TextOverlay`) | Text string + Subtext, 8 scalable vector typography/badge styles (*ModernBold, EditorialSerif, MinimalBox, StampFrame, CinemaSub, RetroBadge, VerticalTag, Signature*), Center (`x, y`), Scale, Opacity, InvertMask (knockout), ColorPreset | `[x]` Done |
 
 ---
 
@@ -162,7 +160,7 @@ flowchart LR
   - `src/ops.rs` & `src/ops_ext.rs` — All 35 `ToolId`s & `EditOp`s, `ToolCategory` grouping, `slider_params()`, and `set_slider_param()`.
   - `src/mask.rs` — `LayerMask` (`256x256` RLE-serialized mask grid, stroke/dab painting, bilinear sampling) + 7 `SmartMaskKind` generators.
   - `src/stack.rs` — `EditStack`, `EditNode` (`id`, `enabled`, `opacity`, `mask`, `op`), `HistoryManager<T>` (`100` steps), `ToolSessionHistory`.
-  - `src/looks.rs` — Snapseed's 11 built-in `LookPreset`s + custom Look serialization.
+  - `src/looks.rs` — 11 built-in `LookPreset`s + custom Look serialization.
   - `src/config.rs` — XDG persistence (`~/.config/snap/config.json`, `~/.local/share/snap/{luts,looks}/`).
   - `src/image_types.rs` — `LinearImage`, `Lut3D` + CPU reference trilinear sampler, `HistogramData`.
 - **`crates/snap-io/`**

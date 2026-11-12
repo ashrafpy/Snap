@@ -221,7 +221,7 @@ pub enum CurveChannelId {
     Luminance,
 }
 
-/// The 10 standard Snapseed Curves presets.
+/// The 10 standard Curves presets.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CurvePreset {
     Neutral,
