@@ -115,3 +115,5 @@ Snap brings the fluid dual-axis canvas gesture workflow and creative toolkit of 
 - **`crates/snap-io`**: RAW (`rawler`), JPEG (`zune-jpeg`), 8/16-bit PNG/TIFF/WebP (`image`), ICC (`moxcms`), EXIF (`kamadak-exif`), `.cube`/`.3dl`/Hald `.png`/`.zip` 3D LUTs, Lightroom `.xmp` presets, `.snap` sidecars, and Lanczos3 export.
 - **`crates/snap-gpu`**: `wgpu 27.0` Vulkan compute engine (`Rgba16Float` ping-pong passes, hardware trilinear 3D LUT cache, 26 Phase 2–4 WGSL shaders, per-node `LayerMask` compositing, vector `text_raster`, atomic 256-bin histogram, `HeadlessGpu`).
 - **`crates/snap-app`**: `iced 0.14` Wayland/X11 Darkroom Studio, 69 pure-vector `canvas::Program` icons, 3-Way Color Grade wheels, interactive viewport overlays, `--batch-dir` CLI, and offscreen Vulkan preview harness.
+
+> For the complete 36-tool parity matrix, system architecture diagram, and GPU engineering invariants, see [product_spec.md](product_spec.md).
